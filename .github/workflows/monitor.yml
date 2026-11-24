@@ -1,0 +1,37 @@
+name: KOSPI100 KOSDAQ100 Drop Alert
+
+on:
+  schedule:
+    # UTC 00:00~06:50 (월~금) = 한국시간(KST) 평일 09:00~15:50 동안 10분마다 실행
+    - cron: '*/10 0-6 * * 1-5'
+  workflow_dispatch: # 수동 테스트 버튼 활성화
+
+permissions:
+  contents: write # 중복 알림 방지 기록(alert_state.json) 자동 저장 권한
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 저장소 코드 불러오기
+        uses: actions/checkout@v4
+
+      - name: 파이썬 환경 세팅
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 필수 라이브러리 설치
+        run: pip install -r requirements.txt
+
+      - name: 급락 종목 스캔 및 디스코드 알림 발송
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python bot_actions.py
+
+      - name: 중복 알림 방지 상태 저장
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add alert_state.json
+          git diff --staged --quiet || (git commit -m "Update alert state" && git push)
