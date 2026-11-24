@@ -36,4 +36,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add alert_state.json signal_history.csv
-          git diff --staged --quiet || (git commit -m "Update alert state and signal history" && git push)
+          git diff --staged --quiet || (git commit -m "Update alert state and signal history" && git pull --rebase --autostash && git push)
