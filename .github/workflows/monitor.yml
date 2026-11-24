@@ -1,15 +1,15 @@
-name: KOSPI100 KOSDAQ100 Drop Alert
+name: KOSPI200 KOSDAQ200 Smart Alert
 
 on:
-      schedule:
-        # 한국시간(KST) 평일 09:00~15:55 동안 5분마다 실행
-        - cron: '*/5 0-6 * * 1-5'
-        # 한국시간(KST) 평일 16:00, 16:05, 16:10 추가 실행 (15:30 확정 종가 브리핑 보장)
-        - cron: '0,5,10 7 * * 1-5'
-      workflow_dispatch:
+  schedule:
+    # 한국시간(KST) 평일 09:00 ~ 15:55 동안 5분마다 실행
+    - cron: '*/5 0-6 * * 1-5'
+    # 한국시간(KST) 평일 16:00, 16:05, 16:10 추가 실행 (15:30 확정 종가 브리핑 보장)
+    - cron: '0,5,10 7 * * 1-5'
+  workflow_dispatch:
 
 permissions:
-  contents: write # 중복 알림 방지 기록(alert_state.json) 자동 저장 권한
+  contents: write
 
 jobs:
   scan:
@@ -26,14 +26,14 @@ jobs:
       - name: 필수 라이브러리 설치
         run: pip install -r requirements.txt
 
-      - name: 급락 종목 스캔 및 디스코드 알림 발송
+      - name: 코스피200·코스닥200 스마트 스캔 실행
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
         run: python bot_actions.py
 
-      - name: 중복 알림 방지 상태 저장
+      - name: 알림 상태 및 시그널 성과 CSV 저장
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add alert_state.json
-          git diff --staged --quiet || (git commit -m "Update alert state" && git push)
+          git add alert_state.json signal_history.csv
+          git diff --staged --quiet || (git commit -m "Update alert state and signal history" && git push)
