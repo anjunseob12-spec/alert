@@ -112,7 +112,8 @@
       "DROP_-5.0"
     ],
     "286750": [
-      "HIST_LOW"
+      "HIST_LOW",
+      "DROP_-5.0"
     ],
     "247660": [
       "DROP_-5.0"
@@ -194,6 +195,9 @@
     ],
     "459510": [
       "DROP_-5.0"
+    ],
+    "MARKET": [
+      "BATCH_8_CLOSING"
     ]
   },
   "cooldowns": {
@@ -16820,7 +16824,7 @@
     "target_cnt": 400,
     "levels_ok": 398,
     "krx_cnt": 0,
-    "fb_cnt": 413,
+    "fb_cnt": 416,
     "fail_cnt": 0
   }
 }
