@@ -3,8 +3,6 @@ name: KOSPI200 KOSDAQ200 스마트 알림
 on:
   schedule:
     # 평일(월~금) KST 09:05 ~ 15:40 구간 10분 간격 실행 (UTC 기준: KST - 9시간)
-    # 00:05 UTC = 09:05 KST, 01:00 UTC = 10:00 KST, 02:00 UTC = 11:00 KST,
-    # 05:30 UTC = 14:30 KST, 06:00 UTC = 15:00 KST, 06:35 UTC = 15:35 KST
     - cron: "5,15,25,35,45,55 0 * * 1-5"
     - cron: "0,10,20,30,40,50 1-5 * * 1-5"
     - cron: "0,10,20,30,40 6 * * 1-5"
@@ -26,12 +24,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install requests pandas FinanceDataReader lxml beautifulsoup4
+          pip install requests pandas finance-datareader lxml beautifulsoup4
 
       - name: Run smart alert bot
         env:
