@@ -1,21 +1,23 @@
 """
-[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.2)]
+[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.7)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
-- 핵심 검증 반영:
-  1. 네이버 금융 장중 시세 일괄 동기화로 KRX StockListing 장중 정체(전일종가 고정) 문제 해결
-  2. MarketType 컬럼 명시 할당으로 KeyError 원천 차단
-  3. 마감 브리핑(15:55~16:15) 재검증 강화: NEW_6 지수 -1.0% 이하 유지 확인 & NEW_4 마감 RVOL <= 120% 확인
-  4. ETF/KR 등락률 스케일(% vs 소수점) 자동 검증, 실행 로그 출력 및 배치 시차 폴백 보완
-  5. 005930 기본 일봉 기반 휴장일 가드 + KRX: 수정주가 런타임 자동 검증 + signal_history.csv 주간 집계
+- 핵심 반영:
+  1. 20분 지연 로직 완전 제거 -> 09:05 개장 직후 감시 시작, 10:00 돌파 시그널, 15:35 장 마감 브리핑
+  2. 네이버 금융 실시간 일봉(fchart) 1순위 조회로 400종목 및 지수 ETF(069500·229200) 실시간 동기화
+  3. NaverPrevClose 대비 전일종가 5% 이상 괴리 시 권리락·액면분할 종목 당일 스킵 + 장기저점 캐시 자동 갱신
+  4. KRX StockListing 해외 IP 차단 시 네이버 시총 순위 폴백(ETF/ETN/스팩 자동 제외) + 지수 히스토리 fchart 폴백
+  5. GitHub Actions 크론 지연 방어(15:35 이후 마감 브리핑 상한 해제) + signal_history.csv 주간 성과 집계
 """
 
 import os
+import re
 import csv
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import requests
+from requests.adapters import HTTPAdapter
 import pandas as pd
 import FinanceDataReader as fdr
 
@@ -28,6 +30,13 @@ CSV_HEADERS = [
     "entry_price", "stop_price", "target_price",
     "days_elapsed", "d1_ret", "d5_ret", "max_high", "min_low", "outcome"
 ]
+
+ETF_OR_SPAC_PREFIXES = (
+    "KODEX", "TIGER", "RISE", "ACE", "SOL", "KBSTAR", "HANARO",
+    "KOSEF", "KIWOOM", "PLUS", "TIMEFOLIO", "ARIRANG", "WOORI",
+    "BNK", "히어로즈", "TREX", "SMART", "FOCUS", "VITA", "MASTER",
+    "파워", "마이티", "에셋플러스", "마이다스", "하나로", "코세프"
+)
 
 # ==============================================================================
 # 사용자 알림 기준 설정
@@ -52,43 +61,50 @@ CONFIG = {
 }
 
 
+def _safe_float(val, default=0.0):
+    if val is None:
+        return default
+    if isinstance(val, (int, float)):
+        return float(val)
+    s = str(val).replace(",", "").strip()
+    if not s or s == "-":
+        return default
+    try:
+        return float(s)
+    except ValueError:
+        return default
+
+
 def load_state():
     today = datetime.now(KST).strftime("%Y-%m-%d")
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if data.get("date") == today and data.get("version") == 9:
-            return data
-        return {
-            "date": today,
-            "version": 9,
-            "alerted": {},
-            "cooldowns": data.get("cooldowns", {}),
-            "hist_lows": data.get("hist_lows", {}),
-            "hist_low_dates": data.get("hist_low_dates", {}),
-            "active_setups": data.get("active_setups", {}),
-            "trading_dates": data.get("trading_dates", []),
-            "etf_history": [],
-            "today_signals": {},
-            "levels": {},
-            "index_base": {},
-            "health": {},
-        }
-    return {
+    default_state = {
         "date": today,
-        "version": 9,
+        "version": 10,
         "alerted": {},
         "cooldowns": {},
         "hist_lows": {},
         "hist_low_dates": {},
         "active_setups": {},
         "trading_dates": [],
-        "etf_history": [],
         "today_signals": {},
         "levels": {},
         "index_base": {},
         "health": {},
     }
+    if os.path.exists(STATE_FILE):
+        try:
+            with open(STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if data.get("date") == today and data.get("version") == 10:
+                return data
+            default_state["cooldowns"] = data.get("cooldowns", {})
+            default_state["hist_lows"] = data.get("hist_lows", {})
+            default_state["hist_low_dates"] = data.get("hist_low_dates", {})
+            default_state["active_setups"] = data.get("active_setups", {})
+            default_state["trading_dates"] = data.get("trading_dates", [])
+        except Exception as e:
+            print(f"상태 파일 초기화(손상 복구): {e}")
+    return default_state
 
 
 def save_state(state):
@@ -137,7 +153,7 @@ def commit_cooldown(state, code, sig_key):
 
 
 def record_today_signal(state, code, name, market_type, sig_id, sig_label, entry_price, stop_price, target_price, buy_zone):
-    """15:55 장 마감 브리핑 TOP 3 및 성과 CSV 기록용 시그널 적재"""
+    """15:35 장 마감 브리핑 TOP 3 및 성과 CSV 기록용 시그널 적재"""
     entry = state["today_signals"].setdefault(code, {
         "name": name,
         "market": market_type,
@@ -242,8 +258,8 @@ def append_signal_csv(date_str, code, name, market, sig_id, sig_label, entry_pri
 def update_signal_csv_performance(state, live_snapshots, hhmm):
     """
     과거 발동 시그널 성과 추적:
-    - 장중(hhmm < 1555): max_high, min_low 및 STOP_HIT/TARGET_HIT/BOTH_HIT만 갱신
-    - 마감(hhmm >= 1555): D+1/D+5 종가 수익률, EXPIRED_5D, days_elapsed 최종 확정
+    - 장중(hhmm < 1535): max_high, min_low 및 STOP_HIT/TARGET_HIT/BOTH_HIT만 갱신
+    - 마감(hhmm >= 1535): D+1/D+5 종가 수익률, EXPIRED_5D, days_elapsed 최종 확정
     """
     ensure_csv_exists()
     with open(CSV_FILE, "r", newline="", encoding="utf-8-sig") as f:
@@ -253,7 +269,7 @@ def update_signal_csv_performance(state, live_snapshots, hhmm):
         return
 
     today = state["date"]
-    is_closing = (hhmm >= 1555)
+    is_closing = (hhmm >= 1535)
     changed = False
 
     for r in rows:
@@ -360,22 +376,29 @@ def build_weekly_performance_summary():
 
 
 def send_discord_embed(webhook_url, title, description, color, fields=None, author_text=None):
+    clean_url = webhook_url.strip().strip('"').strip("'")
+    if not clean_url.startswith(("http://", "https://")):
+        raise ValueError("DISCORD_WEBHOOK_URL 형식이 올바르지 않습니다 (https://로 시작해야 함).")
+
     embed = {
-        "title": title,
-        "description": description,
+        "title": title[:250],
+        "description": description[:4000],
         "color": color,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
     if author_text:
-        embed["author"] = {"name": author_text}
+        embed["author"] = {"name": author_text[:250]}
     if fields:
-        embed["fields"] = fields
+        embed["fields"] = fields[:25]
 
     for _ in range(3):
         try:
-            res = requests.post(webhook_url, json={"embeds": [embed]}, timeout=10)
+            res = requests.post(clean_url, json={"embeds": [embed]}, timeout=10)
             if res.status_code == 429:
-                retry_after = float(res.json().get("retry_after", 2.0))
+                try:
+                    retry_after = float(res.json().get("retry_after", 2.0))
+                except Exception:
+                    retry_after = 2.0
                 time.sleep(retry_after + 0.5)
                 continue
             res.raise_for_status()
@@ -446,19 +469,135 @@ def _fetch_daily_ohlcv(code, start_date=None, use_krx_prefix=False):
     return None, "FAIL"
 
 
+def fetch_naver_intraday_quotes(codes):
+    """네이버 금융 실시간 일봉(fchart) 병렬 조회로 전 종목 시가/고가/저가/현재가/거래량/기준가 100% 동기화"""
+    quotes = {}
+    today_ymd = datetime.now(KST).strftime("%Y%m%d")
+    code_list = list(dict.fromkeys(str(c).zfill(6) for c in codes if c))
+
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.naver.com/",
+    })
+
+    def _fetch_one(cd):
+        url = f"https://fchart.stock.naver.com/sise.nhn?symbol={cd}&timeframe=day&count=2&requestType=0"
+        try:
+            res = session.get(url, timeout=8)
+            res.raise_for_status()
+            items = re.findall(r'data="([^"]+)"', res.text)
+            if not items:
+                return cd, None
+            last_parts = items[-1].split("|")
+            if len(last_parts) < 6 or last_parts[0].strip() != today_ymd:
+                return cd, None
+
+            o = _safe_float(last_parts[1])
+            h = _safe_float(last_parts[2])
+            l = _safe_float(last_parts[3])
+            c = _safe_float(last_parts[4])
+            v = _safe_float(last_parts[5])
+            if c <= 0:
+                return cd, None
+
+            o = o if o > 0 else c
+            h = max(h, c, o)
+            l = min(l if l > 0 else c, c, o)
+
+            prev_c = 0.0
+            if len(items) >= 2:
+                prev_parts = items[-2].split("|")
+                if len(prev_parts) >= 5:
+                    prev_c = _safe_float(prev_parts[4])
+
+            cr = ((c - prev_c) / prev_c) * 100.0 if prev_c > 0 else 0.0
+            amt = ((h + l + c) / 3.0) * v
+
+            return cd, {
+                "Close": c,
+                "Open": o,
+                "High": h,
+                "Low": l,
+                "Volume": v,
+                "Amount": amt,
+                "ChagesRatio": cr,
+                "NaverPrevClose": prev_c,
+            }
+        except Exception:
+            return cd, None
+
+    try:
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            for cd, q in executor.map(_fetch_one, code_list):
+                if q:
+                    quotes[cd] = q
+    finally:
+        session.close()
+
+    return quotes
+
+
+def _fetch_index_history_fchart(idx_code, today_str):
+    """FDR 지수 히스토리 조회 실패 시 네이버 fchart(KOSPI/KOSDAQ) 일봉 폴백"""
+    sym = "KOSPI" if idx_code == "KS11" else "KOSDAQ"
+    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={sym}&timeframe=day&count=180&requestType=0"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.naver.com/",
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=10)
+        res.raise_for_status()
+        items = re.findall(r'data="([^"]+)"', res.text)
+        parsed = []
+        for item in items:
+            parts = item.split("|")
+            if len(parts) < 5:
+                continue
+            raw_d = parts[0].strip()
+            if len(raw_d) != 8 or not raw_d.isdigit():
+                continue
+            d_str = f"{raw_d[:4]}-{raw_d[4:6]}-{raw_d[6:8]}"
+            if d_str >= today_str:
+                continue
+            close_val = _safe_float(parts[4])
+            if close_val > 0:
+                parsed.append((d_str, close_val))
+
+        if len(parsed) < 130:
+            return None
+
+        recent = parsed[-140:]
+        return {
+            "prev_close": float(recent[-1][1]),
+            "last_date": recent[-1][0],
+            "closes_map": {d: float(c) for d, c in recent},
+        }
+    except Exception as e:
+        print(f"지수({idx_code}) fchart 폴백 조회 오류: {e}")
+        return None
+
+
 def check_trading_day_and_index_history(state, hhmm):
     """
-    1) 09:00~09:19: KRX 20분 지연으로 당일 스냅샷 미생성 구간이므로 대기 종료
-    2) hhmm >= 920: 기본 fdr.DataReader("005930") 마지막 날짜가 오늘이 아니면 휴장일로 즉시 종료 (상한 없음)
-    3) 거래일 캘린더 및 KS11·KQ11 직전 거래일 종가 검증 수집
+    1) 09:05 이전: 개장 전 및 첫 체결 안정화 대기 구간이므로 종료
+    2) hhmm >= 905: 삼성전자(005930) 네이버 실시간 당일봉 유무로 평일 휴장일 즉시 판별
+    3) 거래일 캘린더 및 KS11·KQ11 직전 거래일 종가 검증 수집 (FDR 실패 시 fchart 폴백)
     """
-    if 900 <= hhmm < 920:
-        print("09:20 이전(KRX 20분 지연 대기 구간)이므로 종료합니다.")
+    if hhmm < 905:
+        print("09:05 이전(개장 전 및 초기 체결 안정화 대기 구간)이므로 종료합니다.")
         return False
 
     today_str = state["date"]
-    start_date = (datetime.now(KST) - timedelta(days=430)).strftime("%Y-%m-%d")
+    probe_live = fetch_naver_intraday_quotes(["005930"])
+    if "005930" not in probe_live:
+        print(f"오늘은 휴장일입니다 ({today_str} 삼성전자 장중 체결 없음). 알림 없이 종료합니다.")
+        return False
 
+    start_date = (datetime.now(KST) - timedelta(days=430)).strftime("%Y-%m-%d")
     try:
         probe_df = fdr.DataReader("005930", start_date)
     except Exception as e:
@@ -469,46 +608,45 @@ def check_trading_day_and_index_history(state, hhmm):
         print("기준 종목(005930) 데이터 부족으로 안전 종료합니다.")
         return False
 
-    last_probe_date = str(probe_df.index[-1])[:10]
-    if hhmm >= 920 and last_probe_date != today_str:
-        print(f"오늘은 휴장일입니다 (최근 거래일: {last_probe_date}). 알림 없이 종료합니다.")
-        return False
-
     probe_dates = [str(d)[:10] for d in probe_df.index]
-    if hhmm >= 920:
-        if probe_dates[-1] != today_str:
-            probe_dates.append(today_str)
-        state["trading_dates"] = probe_dates[-160:]
-        prev_trading_day = state["trading_dates"][-2] if len(state["trading_dates"]) >= 2 else ""
-    else:
-        state["trading_dates"] = probe_dates[-160:]
-        prev_trading_day = state["trading_dates"][-1] if state["trading_dates"] else ""
+    if probe_dates[-1] != today_str:
+        probe_dates.append(today_str)
+    state["trading_dates"] = probe_dates[-160:]
+    prev_trading_day = state["trading_dates"][-2] if len(state["trading_dates"]) >= 2 else ""
 
     if state.get("index_base") and state["index_base"].get("valid"):
         return True
 
     idx_base = {"valid": True}
     for idx_code in ["KS11", "KQ11"]:
+        entry = None
         try:
             raw_df = fdr.DataReader(idx_code, start_date)
-            if raw_df is None or len(raw_df) < 130:
-                idx_base["valid"] = False
-                continue
-            df = raw_df.iloc[:-1] if str(raw_df.index[-1])[:10] == today_str else raw_df
-            last_idx_date = str(df.index[-1])[:10]
-            if prev_trading_day and last_idx_date != prev_trading_day:
-                print(f"경고: {idx_code} 마지막 일봉({last_idx_date})이 직전 거래일({prev_trading_day})과 불일치")
-                idx_base["valid"] = False
-            closes = df["Close"].astype(float)
-            dates = [str(d)[:10] for d in df.index]
-            idx_base[idx_code] = {
-                "prev_close": float(closes.iloc[-1]),
-                "last_date": last_idx_date,
-                "closes_map": {dates[i]: float(closes.iloc[i]) for i in range(max(0, len(dates) - 140), len(dates))},
-            }
+            if raw_df is not None and len(raw_df) >= 130:
+                df = raw_df.iloc[:-1] if str(raw_df.index[-1])[:10] == today_str else raw_df
+                last_idx_date = str(df.index[-1])[:10]
+                if not prev_trading_day or last_idx_date == prev_trading_day:
+                    closes = df["Close"].astype(float)
+                    dates = [str(d)[:10] for d in df.index]
+                    entry = {
+                        "prev_close": float(closes.iloc[-1]),
+                        "last_date": last_idx_date,
+                        "closes_map": {dates[i]: float(closes.iloc[i]) for i in range(max(0, len(dates) - 140), len(dates))},
+                    }
         except Exception as e:
-            print(f"지수({idx_code}) 히스토리 조회 오류: {e}")
+            print(f"지수({idx_code}) FDR 조회 오류 -> fchart 폴백 시도: {e}")
+
+        if entry is None:
+            fb_entry = _fetch_index_history_fchart(idx_code, today_str)
+            if fb_entry and (not prev_trading_day or fb_entry["last_date"] == prev_trading_day):
+                entry = fb_entry
+                print(f"지수({idx_code}) 히스토리 fchart 폴백 복구 완료 (기준일: {entry['last_date']})")
+
+        if entry is None:
+            print(f"경고: {idx_code} 히스토리 수집 실패 또는 직전 거래일({prev_trading_day}) 불일치")
             idx_base["valid"] = False
+        else:
+            idx_base[idx_code] = entry
 
     state["index_base"] = idx_base
     return True
@@ -532,101 +670,102 @@ def _parse_etf_pct(row, chg_col):
     return rate
 
 
-def fetch_naver_intraday_quotes(codes):
-    """네이버 금융 장중 시세 API로 400종목 시가/고가/저가/현재가/거래량/거래대금 일괄 조회"""
-    quotes = {}
-    code_list = list(dict.fromkeys(str(c).zfill(6) for c in codes if c))
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Referer": "https://finance.naver.com/",
-    }
-    chunk_size = 80
-    for i in range(0, len(code_list), chunk_size):
-        chunk = code_list[i : i + chunk_size]
-        query = ",".join(f"SERVICE_ITEM:{c}" for c in chunk)
-        url = f"https://polling.finance.naver.com/api/realtime?query={query}"
+def _fetch_naver_market_cap_fallback(market, tracked_codes):
+    """KRX StockListing 차단/실패 시 네이버 시가총액 순위 페이지로 상위 200종목 폴백 (ETF/ETN/스팩 제외)"""
+    sosok = "0" if market == "KOSPI" else "1"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    seen = set()
+    rows = []
+    for page in range(1, 15):
         try:
+            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
             res = requests.get(url, headers=headers, timeout=10)
-            res.raise_for_status()
-            areas = res.json().get("result", {}).get("areas", [])
-            for area in areas:
-                for item in area.get("datas", []):
-                    cd = str(item.get("cd", "")).zfill(6)
-                    nv = float(item.get("nv") or 0)
-                    if not cd or nv <= 0:
-                        continue
-                    ov = float(item.get("ov") or nv)
-                    hv = float(item.get("hv") or nv)
-                    lv = float(item.get("lv") or nv)
-                    aq = float(item.get("aq") or 0)
-                    aa = float(item.get("aa") or 0)
-                    sv = float(item.get("sv") or 0)
-                    cr = float(item.get("cr") or 0)
-
-                    est_amt = ((hv + lv + nv) / 3.0) * aq
-                    if aa > 0 and est_amt > 0:
-                        if 0.2 <= (aa * 1_000_000.0) / est_amt <= 5.0:
-                            amt = aa * 1_000_000.0
-                        elif 0.2 <= aa / est_amt <= 5.0:
-                            amt = aa
-                        else:
-                            amt = est_amt
-                    else:
-                        amt = est_amt
-
-                    quotes[cd] = {
-                        "Close": nv,
-                        "Open": ov if ov > 0 else nv,
-                        "High": hv if hv > 0 else nv,
-                        "Low": lv if lv > 0 else nv,
-                        "Volume": aq,
-                        "Amount": amt,
-                        "ChagesRatio": cr,
-                        "NaverPrevClose": sv,
-                    }
+            res.encoding = "euc-kr"
+            matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', res.text)
+            for cd, nm in matches:
+                if cd in seen:
+                    continue
+                seen.add(cd)
+                clean_nm = nm.strip()
+                if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
+                    continue
+                if (
+                    clean_nm.startswith(ETF_OR_SPAC_PREFIXES)
+                    or "스팩" in clean_nm
+                    or "ETN" in clean_nm
+                    or "ETF" in clean_nm
+                    or re.search(r"\d+호$", clean_nm)
+                ):
+                    continue
+                rows.append({"Code": cd, "Name": clean_nm, "MarketType": market})
+            if len(rows) >= CONFIG["TOP_N"] and tracked_codes.issubset(seen):
+                break
         except Exception as e:
-            print(f"네이버 장중 시세 배치 조회 오류({i}~{i+len(chunk)}): {e}")
-    return quotes
+            print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    top_df = df.head(CONFIG["TOP_N"]).copy()
+    top_df["InTop200"] = True
+    extra_df = df[df["Code"].isin(tracked_codes) & ~df["Code"].isin(top_df["Code"])].copy()
+    if not extra_df.empty:
+        extra_df["InTop200"] = False
+        return pd.concat([top_df, extra_df], ignore_index=True)
+    return top_df
 
 
-def fetch_top_universe_and_etf(state, hhmm):
+def fetch_top_universe_and_etf(state):
     """
-    코스피200 + 코스닥200 유니버스 조회 + 네이버 금융 장중 시세 일괄 동기화
-    + ETF/KR(069500, 229200) 등락률 스케일 검증·로그 출력 및 20분 지연 시차 동기화
+    코스피200 + 코스닥200 유니버스 조회 (KRX 실패 시 네이버 시총 폴백)
+    + 네이버 금융 실시간 일봉(fchart) 1순위 일괄 동기화 (지수 ETF 069500·229200 포함)
     """
     tracked_codes = {str(st["code"]).zfill(6) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
 
     frames = []
     for market in ["KOSPI", "KOSDAQ"]:
-        df = fdr.StockListing(market).copy()
-        df["Code"] = df["Code"].astype(str).str.zfill(6)
-        df["MarketType"] = market
-        if CONFIG["EXCLUDE_PREFERRED"]:
-            df = df[df["Code"].str.endswith("0")]
-        df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
-        df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
+        try:
+            df = fdr.StockListing(market).copy()
+            if "Code" not in df.columns and "Symbol" in df.columns:
+                df["Code"] = df["Symbol"]
+            df["Code"] = df["Code"].astype(str).str.zfill(6)
+            df["MarketType"] = market
+            if CONFIG["EXCLUDE_PREFERRED"]:
+                df = df[df["Code"].str.endswith("0")]
+            if "Marcap" in df.columns:
+                df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
+                df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
 
-        top_df = df.head(CONFIG["TOP_N"]).copy()
-        top_df["InTop200"] = True
-        top_df["MarketType"] = market
+            top_df = df.head(CONFIG["TOP_N"]).copy()
+            top_df["InTop200"] = True
+            top_df["MarketType"] = market
 
-        extra_df = df[df["Code"].isin(tracked_codes) & ~df["Code"].isin(top_df["Code"])].copy()
-        if not extra_df.empty:
-            extra_df["InTop200"] = False
-            extra_df["MarketType"] = market
-            frames.append(pd.concat([top_df, extra_df], ignore_index=True))
-        else:
-            frames.append(top_df)
+            extra_df = df[df["Code"].isin(tracked_codes) & ~df["Code"].isin(top_df["Code"])].copy()
+            if not extra_df.empty:
+                extra_df["InTop200"] = False
+                extra_df["MarketType"] = market
+                frames.append(pd.concat([top_df, extra_df], ignore_index=True))
+            else:
+                frames.append(top_df)
+        except Exception as e:
+            print(f"KRX {market} 목록 조회 실패 -> 네이버 시총 순위 폴백 사용: {e}")
+            fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
+            if not fb_df.empty:
+                frames.append(fb_df)
+
+    if not frames:
+        raise RuntimeError("코스피/코스닥 종목 목록 조회에 모두 실패했습니다.")
 
     combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
-    for col in ["Open", "High", "Close", "Low", "ChagesRatio", "Volume", "Amount"]:
+    for col in ["Open", "High", "Close", "Low", "ChagesRatio", "Volume", "Amount", "NaverPrevClose"]:
         if col not in combined.columns:
             combined[col] = 0.0
         combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float64")
 
-    # KRX StockListing의 장중 전일종가 고정을 방지하기 위해 네이버 금융 장중 시세로 덮어쓰기
-    live_quotes = fetch_naver_intraday_quotes(combined["Code"].tolist())
+    all_codes = combined["Code"].tolist() + ["069500", "229200"]
+    live_quotes = fetch_naver_intraday_quotes(all_codes)
     if live_quotes:
+        synced_cnt = 0
         for idx, row in combined.iterrows():
             cd = str(row["Code"]).zfill(6)
             q = live_quotes.get(cd)
@@ -638,65 +777,37 @@ def fetch_top_universe_and_etf(state, hhmm):
                 combined.at[idx, "Volume"] = q["Volume"]
                 combined.at[idx, "Amount"] = q["Amount"]
                 combined.at[idx, "ChagesRatio"] = q["ChagesRatio"]
+                combined.at[idx, "NaverPrevClose"] = q["NaverPrevClose"]
+                synced_cnt += 1
         sample_ss = live_quotes.get("005930")
         sample_txt = f" | 삼성전자 {sample_ss['ChagesRatio']:+.2f}%" if sample_ss else ""
-        print(f"장중 시세 동기화: {len(live_quotes)}/{len(combined)}종목{sample_txt}")
+        print(f"실시간 시세 동기화: {synced_cnt}/{len(combined)}종목{sample_txt}")
     else:
-        print("경고: 네이버 장중 시세 조회 실패 -> KRX 기본 목록 값 사용")
+        print("경고: 네이버 실시간 시세 조회 실패 -> KRX 기본 목록 값 사용")
 
+    # 지수 ETF(069500·229200): 실시간 fchart를 1순위로 사용하고 누락 시에만 ETF/KR 폴백
     etf_now = {}
-    try:
-        etf = fdr.StockListing("ETF/KR")
-        sym_col = "Symbol" if "Symbol" in etf.columns else "Code"
-        chg_col = "ChangeRate" if "ChangeRate" in etf.columns else "ChagesRatio"
-        sub = etf[etf[sym_col].astype(str).isin(["069500", "229200"])]
-        for _, r in sub.iterrows():
-            pct_val = _parse_etf_pct(r, chg_col)
-            if pct_val is not None:
-                etf_now[str(r[sym_col])] = pct_val
-        print(f"ETF/KR 등락률(%): {etf_now}")
-    except Exception as e:
-        print(f"ETF/KR 조회 오류: {e}")
+    for etf_cd in ["069500", "229200"]:
+        if etf_cd in live_quotes:
+            etf_now[etf_cd] = round(live_quotes[etf_cd]["ChagesRatio"], 4)
 
-    now_ts = time.time()
-    etf_hist = state.setdefault("etf_history", [])
-    if "069500" in etf_now and "229200" in etf_now:
-        etf_hist.append({
-            "ts": now_ts,
-            "hhmm": hhmm,
-            "069500": etf_now["069500"],
-            "229200": etf_now["229200"],
-        })
-        state["etf_history"] = etf_hist[-50:]
+    if len(etf_now) < 2:
+        try:
+            etf = fdr.StockListing("ETF/KR")
+            sym_col = "Symbol" if "Symbol" in etf.columns else "Code"
+            chg_col = "ChangeRate" if "ChangeRate" in etf.columns else "ChagesRatio"
+            sub = etf[etf[sym_col].astype(str).isin(["069500", "229200"])]
+            for _, r in sub.iterrows():
+                cd_str = str(r[sym_col])
+                if cd_str not in etf_now:
+                    pct_val = _parse_etf_pct(r, chg_col)
+                    if pct_val is not None:
+                        etf_now[cd_str] = pct_val
+        except Exception as e:
+            print(f"ETF/KR 폴백 조회 오류: {e}")
 
-    aligned_etf = {}
-    if 920 <= hhmm <= 1550:
-        best_item = None
-        best_diff = 999999
-        for item in etf_hist:
-            age = now_ts - item["ts"]
-            if 12 * 60 <= age <= 35 * 60:
-                diff = abs(age - 20 * 60)
-                if diff < best_diff:
-                    best_diff = diff
-                    best_item = item
-        if best_item is None:
-            for item in etf_hist:
-                age = now_ts - item["ts"]
-                if 4 * 60 <= age <= 50 * 60:
-                    diff = abs(age - 20 * 60)
-                    if diff < best_diff:
-                        best_diff = diff
-                        best_item = item
-        if best_item:
-            aligned_etf = {"069500": best_item["069500"], "229200": best_item["229200"]}
-        elif "069500" in etf_now and "229200" in etf_now:
-            aligned_etf = etf_now
-    else:
-        if "069500" in etf_now and "229200" in etf_now:
-            aligned_etf = etf_now
-
-    return combined, aligned_etf, bool(etf_now)
+    print(f"실시간 지수ETF 등락률(%): {etf_now}")
+    return combined, etf_now, bool(etf_now)
 
 
 def _need_full_hist_refresh(today_str, last_refreshed_str, cached_hist_low):
@@ -711,7 +822,7 @@ def _need_full_hist_refresh(today_str, last_refreshed_str, cached_hist_low):
 
 
 def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low, need_full_refresh, use_krx_prefix):
-    """수정주가 일봉 기반 기준선(hh240 포함) + 주간 3,000봉 장기 역사적 저점 계산"""
+    """수정주가 일봉 기반 기준선(hh240 포함) + 주간 전체 일봉 장기 역사적 저점 계산"""
     try:
         today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
@@ -756,7 +867,6 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
         avg_vol_20 = float(v.tail(20).mean())
         adv20 = float(amt.tail(20).mean())
 
-        # 1) 기존 10거래일 전저점 (PREV_LOW)
         w = CONFIG["PIVOT_WINDOW_DAYS"]
         recent_150 = l.tail(150).iloc[:-3].values
         pivots_10 = []
@@ -767,7 +877,6 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
         below_10 = [p for p in pivots_10 if p < prev_close * 0.99]
         prev_low = max(below_10) if below_10 else 0.0
 
-        # 2) 신규 1번용: 6개월(120일) 내 깨진 적 없는 의미 있는 PL
         l_120 = l.tail(120).values
         h_120 = h.tail(120).values
         sweep_pl_candidates = []
@@ -782,7 +891,6 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
                         sweep_pl_candidates.append(pl_val)
         sweep_pl = max(sweep_pl_candidates) if sweep_pl_candidates else 0.0
 
-        # 3) 이동평균 시리즈 및 누적합
         ma20_s = c.rolling(20).mean()
         ma60_s = c.rolling(60).mean()
         ma120_s = c.rolling(120).mean()
@@ -798,13 +906,11 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
         c_5_ago = float(c.iloc[-5])
         c_26_ago = float(c.iloc[-26])
 
-        # 신규 2번용: 최근 40일 중 32일 이상 Close < MA120 & 최근 20일간 R 돌파 없음
         r_s = pd.concat([ma60_s, ma120_s], axis=1).max(axis=1)
         below_120_cnt = int((c.tail(40) < ma120_s.tail(40)).sum())
         clear_r_20 = bool((c.tail(20) <= r_s.tail(20)).all())
         ma_base_ok = (below_120_cnt >= 32) and clear_r_20
 
-        # 4) 신규 3번용: 일목균형표 구름대 상단 (오늘 구름 = raw_top.iloc[-26])
         tenkan_s = (h.rolling(9).max() + l.rolling(9).min()) / 2.0
         kijun_s = (h.rolling(26).max() + l.rolling(26).min()) / 2.0
         span_a = (tenkan_s + kijun_s) / 2.0
@@ -820,7 +926,6 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
         hh25 = float(h.tail(25).max())
         ll25 = float(l.tail(25).min())
 
-        # 5) 고점 및 정배열 20일선 눌림 사전 데이터
         hh19 = float(h.tail(19).max())
         hh60 = float(h.tail(60).max())
         hh120 = float(h.tail(120).max())
@@ -830,7 +935,6 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
         min_chg_4d = float(pct_chg_s.tail(4).min())
         ma20_touch_10d = bool((l.tail(10) <= ma20_s.tail(10) * 1.01).any())
 
-        # 6) 신규 5번용: 2~10거래일 전 기준봉 B 탐색
         min_b_pct = 5.0 if market_type == "KOSPI" else 7.0
         candle_b = None
         for offset in range(2, 11):
@@ -868,7 +972,6 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
                     }
                     break
 
-        # 7) 신규 7번용: RS 라인
         rs_vals = []
         for i in range(max(0, len(dates) - 125), len(dates)):
             d_str = dates[i]
@@ -995,21 +1098,21 @@ def ensure_daily_levels(state, df):
 
 
 def get_market_elapsed_ratio():
+    """정규장(09:00~15:30, 390분) 기준 실제 실시간 경과 비율"""
     now = datetime.now(KST)
     hhmm = now.hour * 100 + now.minute
-    if hhmm < 920 or hhmm >= 1550:
+    if hhmm < 905 or hhmm >= 1530:
         return 1.0
     market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
     elapsed_min = (now - market_open).total_seconds() / 60.0
-    data_elapsed_min = elapsed_min - 20.0
-    effective_min = min(390.0, max(15.0, data_elapsed_min))
+    effective_min = min(390.0, max(5.0, elapsed_min))
     return effective_min / 390.0
 
 
 def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_chg, kq_chg, hhmm):
     """
     #4·#6·#7 준비 신호의 후속 진입 트리거 발동 및 손절 이탈 감시 (최대 5거래일)
-    - #4·#7 손절 이탈은 종가 기준 전략에 맞춰 hhmm >= 1520 이후에만 판정
+    - #4·#7 손절 이탈은 종가 기준 전략에 맞춰 hhmm >= 1515 이후에만 판정
     """
     setups = state.get("active_setups", {})
     if not setups:
@@ -1044,11 +1147,11 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
         market_type = st["market"]
 
         invalid_reason = None
-        if sig_id == "NEW_4" and hhmm >= 1520 and c < ma20 * 0.97:
+        if sig_id == "NEW_4" and hhmm >= 1515 and c < ma20 * 0.97:
             invalid_reason = f"종가 무렵 현재가({int(c):,}원)가 20일선 3% 손절선({int(ma20*0.97):,}원)을 이탈했습니다."
         elif sig_id == "NEW_6" and l < st["setup_low"]:
             invalid_reason = f"당일 저가({int(l):,}원)가 급락일 저가({int(st['setup_low']):,}원)를 하향 이탈했습니다."
-        elif sig_id == "NEW_7" and hhmm >= 1520 and c < ma20:
+        elif sig_id == "NEW_7" and hhmm >= 1515 and c < ma20:
             invalid_reason = f"종가 무렵 현재가({int(c):,}원)가 20일 이동평균선({int(ma20):,}원)을 이탈했습니다."
 
         if invalid_reason:
@@ -1115,24 +1218,23 @@ def main():
     now = datetime.now(KST)
     hhmm = now.hour * 100 + now.minute
 
-    # 1) 09:20 이전 대기 및 평일 공휴일 가드
     if not check_trading_day_and_index_history(state, hhmm):
         return
 
-    is_after_10am_data = (hhmm >= 1020) or (hhmm < 900)
+    is_after_10am = (hhmm >= 1000)
     sent_count = 0
     batch_6_candidates = []
     batch_7_candidates = []
     live_snapshots = {}
 
     try:
-        df, aligned_etf, raw_etf_ok = fetch_top_universe_and_etf(state, hhmm)
+        df, etf_now, raw_etf_ok = fetch_top_universe_and_etf(state)
         ensure_daily_levels(state, df)
 
         idx_hist_ok = state.get("index_base", {}).get("valid", False)
-        etf_valid = idx_hist_ok and ("069500" in aligned_etf) and ("229200" in aligned_etf)
-        ks_chg = aligned_etf.get("069500")
-        kq_chg = aligned_etf.get("229200")
+        etf_valid = idx_hist_ok and ("069500" in etf_now) and ("229200" in etf_now)
+        ks_chg = etf_now.get("069500")
+        kq_chg = etf_now.get("229200")
 
         idx_base = state.get("index_base", {})
         ks_prev = idx_base.get("KS11", {}).get("prev_close", 0.0)
@@ -1155,6 +1257,13 @@ def main():
 
             lv = state["levels"].get(code)
             if not lv:
+                continue
+
+            # 권리락·무상증자·액면분할 등으로 네이버 기준 전일종가와 일봉 종가가 5% 이상 괴리 시 당일 스킵 + 저점캐시 초기화
+            naver_prev = float(row["NaverPrevClose"]) if ("NaverPrevClose" in row and pd.notna(row["NaverPrevClose"])) else 0.0
+            if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.05:
+                state.get("hist_lows", {}).pop(code, None)
+                state.get("hist_low_dates", {}).pop(code, None)
                 continue
 
             o = float(row["Open"]) if ("Open" in row and pd.notna(row["Open"]) and row["Open"] > 0) else c
@@ -1303,7 +1412,7 @@ def main():
                         title, color = f"🔥 [-10% 폭락 경보] {name} ({code})", 15158332
                     else:
                         title, color = f"📉 [-5% 급락 알림] {name} ({code})", 15105570
-                    idx_txt = f"{idx_chg:+.2f}%" if idx_chg is not None else "지연동기대기"
+                    idx_txt = f"{idx_chg:+.2f}%" if idx_chg is not None else "조회대기"
                     ok = send_individual_card(
                         webhook_url, market_type,
                         title=title,
@@ -1333,7 +1442,7 @@ def main():
 
             # --- [신규 1] 전저점 스윕 리클레임 ---
             pl = lv["sweep_pl"]
-            if is_after_10am_data and pl > 0:
+            if is_after_10am and pl > 0:
                 target_1 = ma20 if ma20 > c else hh20
                 rr_1 = ((target_1 - c) / (c - l)) if c > l else 0.0
                 if (
@@ -1373,7 +1482,7 @@ def main():
             # --- [신규 2 & 3] 60·120일선 첫 돌파 & 일목 구름대 상단 첫 돌파 ---
             r_line = max(ma60, ma120)
             cond_2 = (
-                is_after_10am_data
+                is_after_10am
                 and lv["ma_base_ok"]
                 and c > r_line * 1.01
                 and chg >= 3.0
@@ -1388,7 +1497,7 @@ def main():
             t_today = (max(lv["hh8"], h) + min(lv["ll8"], l)) / 2.0
             k_today = (max(lv["hh25"], h) + min(lv["ll25"], l)) / 2.0
             cond_3 = (
-                is_after_10am_data
+                is_after_10am
                 and top_cloud > 0
                 and lv["ichimoku_clear_20"]
                 and c > top_cloud * 1.01
@@ -1577,7 +1686,7 @@ def main():
                             )
                             sent_count += 1
 
-            # --- [신규 6 & 7] 지수 ETF 시차 동기화 완료 시 후보 수집 ---
+            # --- [신규 6 & 7] 실시간 지수 ETF 기준 후보 수집 ---
             if etf_valid and idx_chg is not None:
                 last_cd_6 = state["cooldowns"].get(f"{code}:NEW_6_DEFIANT")
                 cd_6_blocked = (
@@ -1626,12 +1735,12 @@ def main():
         update_signal_csv_performance(state, live_snapshots, hhmm)
 
         # ==================================================================
-        # [D] 정시 배치 알림 발송 (#6 11:20/14:50, #7 15:20, #8 15:55~16:15)
+        # [D] 정시 배치 알림 발송 (#6 11:00/14:30, #7 15:00, #8 15:35 이후)
         # ==================================================================
         slot_6 = None
-        if 1120 <= hhmm <= 1140:
+        if 1100 <= hhmm <= 1130:
             slot_6 = "BATCH_6_1100"
-        elif 1450 <= hhmm <= 1510:
+        elif 1430 <= hhmm < 1500:
             slot_6 = "BATCH_6_1430"
 
         if etf_valid and slot_6 and batch_6_candidates and can_fire_once(state, "MARKET", slot_6):
@@ -1676,7 +1785,7 @@ def main():
                     )
                 sent_count += 1
 
-        if etf_valid and 1520 <= hhmm <= 1540 and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_1500"):
+        if etf_valid and 1500 <= hhmm < 1535 and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_1500"):
             valid_7 = [it for it in batch_7_candidates if can_fire_cooldown(state, it["code"], "NEW_7_RS")]
             top5_7 = sorted(valid_7, key=lambda x: x["rs_growth"], reverse=True)[:5]
             if top5_7:
@@ -1721,8 +1830,8 @@ def main():
                         )
                     sent_count += 1
 
-        # 8번: 15:55 ~ 16:15 장 마감 브리핑 TOP 3 + 당일 active_setups 종가 동기화
-        if 1555 <= hhmm <= 1615 and can_fire_once(state, "MARKET", "BATCH_8_CLOSING"):
+        # 8번: 15:35 이후 장 마감 브리핑 TOP 3 + 당일 active_setups 종가 동기화 (크론 지연 방어용 상한 해제)
+        if hhmm >= 1535 and can_fire_once(state, "MARKET", "BATCH_8_CLOSING"):
             base_scores = {
                 "NEW_1": 30, "NEW_2": 30, "NEW_3": 25,
                 "NEW_6": 25, "NEW_4": 20, "NEW_5": 20, "NEW_7": 15,
@@ -1848,7 +1957,6 @@ def main():
                     "rr": rr,
                 })
 
-            # 당일 생성된 active_setups 종가 재검증 동기화
             setups = state.get("active_setups", {})
             for key, st in list(setups.items()):
                 if st.get("created_date") == state["date"]:
@@ -1866,7 +1974,7 @@ def main():
                         st["target_price"] = float(meta["target"])
 
             hl = state.get("health", {})
-            etf_stat = "정상(시차동기화)" if etf_valid else ("조회됨(시차대기)" if raw_etf_ok else "미조회")
+            etf_stat = "실시간정상" if etf_valid else ("일부조회" if raw_etf_ok else "미조회")
             health_line = (
                 f"🩺 **시스템 헬스체크:** 스캔 `{hl.get('target_cnt', 400)}종목` | "
                 f"기준선 성공 `{hl.get('levels_ok', len(state['levels']))}건` (KRX `{hl.get('krx_cnt', 0)}` / 폴백 `{hl.get('fb_cnt', 0)}`) | "
