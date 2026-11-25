@@ -1,12 +1,9 @@
 """
-[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.7)]
-- 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
+[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.9)]
 - 핵심 반영:
-  1. 20분 지연 로직 완전 제거 -> 09:05 개장 직후 감시 시작, 10:00 돌파 시그널, 15:35 장 마감 브리핑
-  2. 네이버 금융 실시간 일봉(fchart) 1순위 조회로 400종목 및 지수 ETF(069500·229200) 실시간 동기화
-  3. NaverPrevClose 대비 전일종가 5% 이상 괴리 시 권리락·액면분할 종목 당일 스킵 + 장기저점 캐시 자동 갱신
-  4. KRX StockListing 해외 IP 차단 시 네이버 시총 순위 폴백(ETF/ETN/스팩 자동 제외) + 지수 히스토리 fchart 폴백
-  5. GitHub Actions 크론 지연 방어(15:35 이후 마감 브리핑 상한 해제) + signal_history.csv 주간 성과 집계
+  1. KRX StockListing 해외 IP 차단/대형주(삼성전자·SK하이닉스) 누락 시 네이버 시총 순위 폴백
+  2. Discord 429 속도 제한 최대 6회 재시도 + 핵심 퀀트 시그널(1~8번, 후속 트리거) @everyone 멘션 알림
+  3. 15:35 이후 장중 개별 알림 차단 및 정시 배치 창구 확대
 """
 
 import os
@@ -35,17 +32,13 @@ ETF_OR_SPAC_PREFIXES = (
     "KODEX", "TIGER", "RISE", "ACE", "SOL", "KBSTAR", "HANARO",
     "KOSEF", "KIWOOM", "PLUS", "TIMEFOLIO", "ARIRANG", "WOORI",
     "BNK", "히어로즈", "TREX", "SMART", "FOCUS", "VITA", "MASTER",
-    "파워", "마이티", "에셋플러스", "마이다스", "하나로", "코세프"
+    "파워", "마이티", "에셋플러스", "마이다스", "하나로", "코세프",
+    "KoAct", "1Q", "WON", "UNICORN", "HK"
 )
 
-# ==============================================================================
-# 사용자 알림 기준 설정
-# ==============================================================================
 CONFIG = {
-    "TOP_N": 200,                        # 코스피 상위 200 + 코스닥 상위 200 (400종목)
-    "EXCLUDE_PREFERRED": True,           # 우선주 제외 여부
-
-    # [기존 4종 알림 기준]
+    "TOP_N": 200,
+    "EXCLUDE_PREFERRED": True,
     "THRESHOLDS": [-5.0, -10.0, -15.0],
     "PIVOT_WINDOW_DAYS": 10,
     "LOW_TOUCH_BUFFER_PCT": 0.5,
@@ -53,11 +46,9 @@ CONFIG = {
     "MIN_AMOUNT_FOR_PREV_LOW_UK": 150,
     "VOL_SURGE_PCT": 300.0,
     "MIN_TRADE_AMOUNT_UK": 200,
-
-    # [신규 8종 공통 필터]
-    "MIN_ADV20_KRW": 10_000_000_000,     # 20일 평균 거래대금 100억 이상
-    "COOLDOWN_TRADING_DAYS": 5,          # 동일 종목·동일 시그널 5거래일 쿨다운
-    "HIST_LOW_REFRESH_DAYS": 7,          # 액면분할·권리락 반영을 위한 전체 일봉 재조회 주기(일)
+    "MIN_ADV20_KRW": 10_000_000_000,
+    "COOLDOWN_TRADING_DAYS": 5,
+    "HIST_LOW_REFRESH_DAYS": 7,
 }
 
 
@@ -153,7 +144,6 @@ def commit_cooldown(state, code, sig_key):
 
 
 def record_today_signal(state, code, name, market_type, sig_id, sig_label, entry_price, stop_price, target_price, buy_zone):
-    """15:35 장 마감 브리핑 TOP 3 및 성과 CSV 기록용 시그널 적재"""
     entry = state["today_signals"].setdefault(code, {
         "name": name,
         "market": market_type,
@@ -180,7 +170,6 @@ def record_today_signal(state, code, name, market_type, sig_id, sig_label, entry
 
 
 def register_active_setup(state, code, name, market_type, sig_id, sig_label, setup_high, setup_low, setup_hh120, stop_price, target_price):
-    """#4·#6·#7 준비 신호를 최대 5거래일 후속 트리거 감시 목록에 등록"""
     setups = state.setdefault("active_setups", {})
     key = f"{code}:{sig_id}"
     setups[key] = {
@@ -206,7 +195,6 @@ def ensure_csv_exists():
 
 
 def get_open_csv_codes():
-    """아직 5거래일 추적이 끝나지 않은 CSV 종목 코드 반환"""
     if not os.path.exists(CSV_FILE):
         return set()
     codes = set()
@@ -256,11 +244,6 @@ def append_signal_csv(date_str, code, name, market, sig_id, sig_label, entry_pri
 
 
 def update_signal_csv_performance(state, live_snapshots, hhmm):
-    """
-    과거 발동 시그널 성과 추적:
-    - 장중(hhmm < 1535): max_high, min_low 및 STOP_HIT/TARGET_HIT/BOTH_HIT만 갱신
-    - 마감(hhmm >= 1535): D+1/D+5 종가 수익률, EXPIRED_5D, days_elapsed 최종 확정
-    """
     ensure_csv_exists()
     with open(CSV_FILE, "r", newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
@@ -339,7 +322,6 @@ def update_signal_csv_performance(state, live_snapshots, hhmm):
 
 
 def build_weekly_performance_summary():
-    """금요일 마감 브리핑용 시그널 성과 집계 텍스트 생성"""
     if not os.path.exists(CSV_FILE):
         return ""
     with open(CSV_FILE, "r", newline="", encoding="utf-8-sig") as f:
@@ -375,7 +357,7 @@ def build_weekly_performance_summary():
     return "\n".join(lines)
 
 
-def send_discord_embed(webhook_url, title, description, color, fields=None, author_text=None):
+def send_discord_embed(webhook_url, title, description, color, fields=None, author_text=None, mention=False):
     clean_url = webhook_url.strip().strip('"').strip("'")
     if not clean_url.startswith(("http://", "https://")):
         raise ValueError("DISCORD_WEBHOOK_URL 형식이 올바르지 않습니다 (https://로 시작해야 함).")
@@ -391,15 +373,20 @@ def send_discord_embed(webhook_url, title, description, color, fields=None, auth
     if fields:
         embed["fields"] = fields[:25]
 
-    for _ in range(3):
+    payload = {"embeds": [embed]}
+    if mention:
+        payload["content"] = "@everyone 🚨 **[핵심 퀀트 시그널]**"
+        payload["allowed_mentions"] = {"parse": ["everyone"]}
+
+    for _ in range(6):
         try:
-            res = requests.post(clean_url, json={"embeds": [embed]}, timeout=10)
+            res = requests.post(clean_url, json=payload, timeout=10)
             if res.status_code == 429:
                 try:
-                    retry_after = float(res.json().get("retry_after", 2.0))
+                    retry_after = float(res.json().get("retry_after", 2.5))
                 except Exception:
-                    retry_after = 2.0
-                time.sleep(retry_after + 0.5)
+                    retry_after = 2.5
+                time.sleep(retry_after + 1.0)
                 continue
             res.raise_for_status()
             time.sleep(1.2)
@@ -410,7 +397,7 @@ def send_discord_embed(webhook_url, title, description, color, fields=None, auth
     return False
 
 
-def send_individual_card(webhook_url, market_type, title, meaning, action_guide, color, fields):
+def send_individual_card(webhook_url, market_type, title, meaning, action_guide, color, fields, mention=False):
     author_text = "🔵 코스피 200 (KOSPI)" if market_type == "KOSPI" else "🟠 코스닥 200 (KOSDAQ)"
     full_fields = list(fields) + [
         {
@@ -426,14 +413,11 @@ def send_individual_card(webhook_url, market_type, title, meaning, action_guide,
         color=color,
         fields=full_fields,
         author_text=author_text,
+        mention=mention,
     )
 
 
 def _verify_krx_adjusted():
-    """
-    KRX:005930이 수정주가로 내려오는지 런타임 자동 검증:
-    2018-05-04(50:1 액면분할) 이전 종가가 20만원 초과이면 무수정주가이므로 False 반환
-    """
     try:
         df = fdr.DataReader("KRX:005930", "2017-06-01")
         if df is None or len(df) < 100:
@@ -450,7 +434,6 @@ def _verify_krx_adjusted():
 
 
 def _fetch_daily_ohlcv(code, start_date=None, use_krx_prefix=False):
-    """수정주가 검증된 KRX 정규장 일봉 우선 조회, 실패 시 기본 일봉 폴백"""
     if use_krx_prefix:
         try:
             df = fdr.DataReader(f"KRX:{code}", start_date) if start_date else fdr.DataReader(f"KRX:{code}")
@@ -470,7 +453,6 @@ def _fetch_daily_ohlcv(code, start_date=None, use_krx_prefix=False):
 
 
 def fetch_naver_intraday_quotes(codes):
-    """네이버 금융 실시간 일봉(fchart) 병렬 조회로 전 종목 시가/고가/저가/현재가/거래량/기준가 100% 동기화"""
     quotes = {}
     today_ymd = datetime.now(KST).strftime("%Y%m%d")
     code_list = list(dict.fromkeys(str(c).zfill(6) for c in codes if c))
@@ -541,7 +523,6 @@ def fetch_naver_intraday_quotes(codes):
 
 
 def _fetch_index_history_fchart(idx_code, today_str):
-    """FDR 지수 히스토리 조회 실패 시 네이버 fchart(KOSPI/KOSDAQ) 일봉 폴백"""
     sym = "KOSPI" if idx_code == "KS11" else "KOSDAQ"
     url = f"https://fchart.stock.naver.com/sise.nhn?symbol={sym}&timeframe=day&count=180&requestType=0"
     headers = {
@@ -582,11 +563,6 @@ def _fetch_index_history_fchart(idx_code, today_str):
 
 
 def check_trading_day_and_index_history(state, hhmm):
-    """
-    1) 09:05 이전: 개장 전 및 첫 체결 안정화 대기 구간이므로 종료
-    2) hhmm >= 905: 삼성전자(005930) 네이버 실시간 당일봉 유무로 평일 휴장일 즉시 판별
-    3) 거래일 캘린더 및 KS11·KQ11 직전 거래일 종가 검증 수집 (FDR 실패 시 fchart 폴백)
-    """
     if hhmm < 905:
         print("09:05 이전(개장 전 및 초기 체결 안정화 대기 구간)이므로 종료합니다.")
         return False
@@ -653,7 +629,6 @@ def check_trading_day_and_index_history(state, hhmm):
 
 
 def _parse_etf_pct(row, chg_col):
-    """ETF/KR 등락률이 퍼센트(-1.50)인지 소수점(-0.015)인지 자동 검증해 퍼센트 단위로 반환"""
     val = pd.to_numeric(row.get(chg_col), errors="coerce")
     if pd.isna(val):
         return None
@@ -671,37 +646,38 @@ def _parse_etf_pct(row, chg_col):
 
 
 def _fetch_naver_market_cap_fallback(market, tracked_codes):
-    """KRX StockListing 차단/실패 시 네이버 시가총액 순위 페이지로 상위 200종목 폴백 (ETF/ETN/스팩 제외)"""
     sosok = "0" if market == "KOSPI" else "1"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     seen = set()
     rows = []
-    for page in range(1, 15):
-        try:
-            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-            res = requests.get(url, headers=headers, timeout=10)
-            res.encoding = "euc-kr"
-            matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', res.text)
-            for cd, nm in matches:
-                if cd in seen:
-                    continue
-                seen.add(cd)
-                clean_nm = nm.strip()
-                if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
-                    continue
-                if (
-                    clean_nm.startswith(ETF_OR_SPAC_PREFIXES)
-                    or "스팩" in clean_nm
-                    or "ETN" in clean_nm
-                    or "ETF" in clean_nm
-                    or re.search(r"\d+호$", clean_nm)
-                ):
-                    continue
-                rows.append({"Code": cd, "Name": clean_nm, "MarketType": market})
-            if len(rows) >= CONFIG["TOP_N"] and tracked_codes.issubset(seen):
-                break
-        except Exception as e:
-            print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
+
+    with requests.Session() as session:
+        session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+        for page in range(1, 15):
+            try:
+                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+                res = session.get(url, timeout=10)
+                res.encoding = "euc-kr"
+                matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', res.text)
+                for cd, nm in matches:
+                    if cd in seen:
+                        continue
+                    seen.add(cd)
+                    clean_nm = nm.strip()
+                    if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
+                        continue
+                    if (
+                        clean_nm.startswith(ETF_OR_SPAC_PREFIXES)
+                        or "스팩" in clean_nm
+                        or "ETN" in clean_nm
+                        or "ETF" in clean_nm
+                        or re.search(r"\d+호$", clean_nm)
+                    ):
+                        continue
+                    rows.append({"Code": cd, "Name": clean_nm, "MarketType": market})
+                if len(rows) >= CONFIG["TOP_N"] and tracked_codes.issubset(seen):
+                    break
+            except Exception as e:
+                print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -716,10 +692,6 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes):
 
 
 def fetch_top_universe_and_etf(state):
-    """
-    코스피200 + 코스닥200 유니버스 조회 (KRX 실패 시 네이버 시총 폴백)
-    + 네이버 금융 실시간 일봉(fchart) 1순위 일괄 동기화 (지수 ETF 069500·229200 포함)
-    """
     tracked_codes = {str(st["code"]).zfill(6) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
 
     frames = []
@@ -737,6 +709,11 @@ def fetch_top_universe_and_etf(state):
                 df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
 
             top_df = df.head(CONFIG["TOP_N"]).copy()
+            if market == "KOSPI" and not {"005930", "000660"}.issubset(set(top_df["Code"])):
+                raise ValueError("KRX KOSPI 대형주(삼성전자·SK하이닉스) 누락 감지")
+            if len(top_df) < CONFIG["TOP_N"]:
+                raise ValueError(f"KRX {market} 종목 수 부족 ({len(top_df)}종목)")
+
             top_df["InTop200"] = True
             top_df["MarketType"] = market
 
@@ -748,7 +725,7 @@ def fetch_top_universe_and_etf(state):
             else:
                 frames.append(top_df)
         except Exception as e:
-            print(f"KRX {market} 목록 조회 실패 -> 네이버 시총 순위 폴백 사용: {e}")
+            print(f"KRX {market} 목록 조회 보완 -> 네이버 시총 순위 폴백 사용: {e}")
             fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
             if not fb_df.empty:
                 frames.append(fb_df)
@@ -785,7 +762,6 @@ def fetch_top_universe_and_etf(state):
     else:
         print("경고: 네이버 실시간 시세 조회 실패 -> KRX 기본 목록 값 사용")
 
-    # 지수 ETF(069500·229200): 실시간 fchart를 1순위로 사용하고 누락 시에만 ETF/KR 폴백
     etf_now = {}
     for etf_cd in ["069500", "229200"]:
         if etf_cd in live_quotes:
@@ -822,7 +798,6 @@ def _need_full_hist_refresh(today_str, last_refreshed_str, cached_hist_low):
 
 
 def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low, need_full_refresh, use_krx_prefix):
-    """수정주가 일봉 기반 기준선(hh240 포함) + 주간 전체 일봉 장기 역사적 저점 계산"""
     try:
         today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
@@ -1098,7 +1073,6 @@ def ensure_daily_levels(state, df):
 
 
 def get_market_elapsed_ratio():
-    """정규장(09:00~15:30, 390분) 기준 실제 실시간 경과 비율"""
     now = datetime.now(KST)
     hhmm = now.hour * 100 + now.minute
     if hhmm < 905 or hhmm >= 1530:
@@ -1110,10 +1084,6 @@ def get_market_elapsed_ratio():
 
 
 def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_chg, kq_chg, hhmm):
-    """
-    #4·#6·#7 준비 신호의 후속 진입 트리거 발동 및 손절 이탈 감시 (최대 5거래일)
-    - #4·#7 손절 이탈은 종가 기준 전략에 맞춰 hhmm >= 1515 이후에만 판정
-    """
     setups = state.get("active_setups", {})
     if not setups:
         return 0
@@ -1165,6 +1135,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
                     {"name": "현재가 / 등락률", "value": f"{int(c):,}원 (`{snap['chg']:+.2f}%`)", "inline": True},
                     {"name": "경과 거래일", "value": f"D+{diff}일", "inline": True},
                 ],
+                mention=False,
             )
             if ok:
                 to_remove.append(key)
@@ -1199,6 +1170,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
                     {"name": "현재가 / 등락률", "value": f"**{int(c):,}원** (`{snap['chg']:+.2f}%`)", "inline": True},
                     {"name": "경과 거래일", "value": f"D+{diff}일", "inline": True},
                 ],
+                mention=True,
             )
             if ok:
                 to_remove.append(key)
@@ -1221,6 +1193,7 @@ def main():
     if not check_trading_day_and_index_history(state, hhmm):
         return
 
+    is_intraday = (hhmm < 1535)
     is_after_10am = (hhmm >= 1000)
     sent_count = 0
     batch_6_candidates = []
@@ -1259,7 +1232,6 @@ def main():
             if not lv:
                 continue
 
-            # 권리락·무상증자·액면분할 등으로 네이버 기준 전일종가와 일봉 종가가 5% 이상 괴리 시 당일 스킵 + 저점캐시 초기화
             naver_prev = float(row["NaverPrevClose"]) if ("NaverPrevClose" in row and pd.notna(row["NaverPrevClose"])) else 0.0
             if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.05:
                 state.get("hist_lows", {}).pop(code, None)
@@ -1306,11 +1278,11 @@ def main():
                 "hh20": hh20, "rs_today": rs_today,
             }
 
-            if not in_top200:
+            if not in_top200 or not is_intraday:
                 continue
 
             # ==============================================================
-            # [A] 기존 4종 기본 알림
+            # [A] 기존 4종 기본 알림 (멘션 없음)
             # ==============================================================
             hist_low = lv["hist_low"]
             prev_low = lv["prev_low"]
@@ -1435,7 +1407,7 @@ def main():
                         sent_count += 1
 
             # ==============================================================
-            # [B] 신규 8종 공통 노이즈 필터: 20일 평균 거래대금(ADV20) >= 100억
+            # [B] 신규 8종 퀀트 시그널 (mention=True로 @everyone 푸시 발송)
             # ==============================================================
             if adv20 < CONFIG["MIN_ADV20_KRW"]:
                 continue
@@ -1469,6 +1441,7 @@ def main():
                                 {"name": "손절 / 1차목표", "value": f"{int(l):,}원 / {int(target_1):,}원", "inline": True},
                                 {"name": "RVOL / CLV", "value": f"{rvol:,.0f}% / {clv:.2f}", "inline": True},
                             ],
+                            mention=True,
                         )
                         if ok:
                             commit_cooldown(state, code, "NEW_1_SWEEP")
@@ -1532,6 +1505,7 @@ def main():
                             {"name": "돌파 기준 (이평/구름)", "value": f"{int(r_line):,} / {int(top_cloud):,}원", "inline": True},
                             {"name": "손절 / 1차목표", "value": f"{int(stop_23):,} / {int(target_23):,}원", "inline": True},
                         ],
+                        mention=True,
                     )
                     if sent_ok:
                         if ok2:
@@ -1566,6 +1540,7 @@ def main():
                             {"name": "RVOL / 거래대금", "value": f"{rvol:,.0f}% / {amount_uk:,}억", "inline": True},
                             {"name": "손절 / 1차목표", "value": f"{int(r_line*0.99):,} / {int(target_23):,}원", "inline": True},
                         ],
+                        mention=True,
                     )
                     if sent_ok:
                         commit_cooldown(state, code, "NEW_2_MABREAK")
@@ -1592,6 +1567,7 @@ def main():
                             {"name": "RVOL / 거래대금", "value": f"{rvol:,.0f}% / {amount_uk:,}억", "inline": True},
                             {"name": "손절 / 1차목표", "value": f"{int(top_cloud*0.99):,} / {int(target_23):,}원", "inline": True},
                         ],
+                        mention=True,
                     )
                     if sent_ok:
                         commit_cooldown(state, code, "NEW_3_CLOUD")
@@ -1634,6 +1610,7 @@ def main():
                             {"name": "고점대비 / RVOL", "value": f"{dd_from_hh20:.1f}% / {rvol:,.0f}%", "inline": True},
                             {"name": "손절 / 전고점목표", "value": f"{int(ma20*0.97):,} / {int(hh20):,}원", "inline": True},
                         ],
+                        mention=True,
                     )
                     if sent_ok:
                         commit_cooldown(state, code, "NEW_4_MA20PULL")
@@ -1676,6 +1653,7 @@ def main():
                                 {"name": "기준봉 시가(손절)", "value": f"{int(cb['open']):,}원", "inline": True},
                                 {"name": "기준봉 고가(목표)", "value": f"{int(cb['high']):,}원", "inline": True},
                             ],
+                            mention=True,
                         )
                         if sent_ok:
                             commit_cooldown(state, code, "NEW_5_MIDPULL")
@@ -1731,16 +1709,17 @@ def main():
         # ==================================================================
         # [C] 후속 트리거 평가 (#4·#6·#7 5거래일 감시) & 성과 CSV 업데이트
         # ==================================================================
-        sent_count += evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_chg, kq_chg, hhmm)
+        if is_intraday:
+            sent_count += evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_chg, kq_chg, hhmm)
         update_signal_csv_performance(state, live_snapshots, hhmm)
 
         # ==================================================================
-        # [D] 정시 배치 알림 발송 (#6 11:00/14:30, #7 15:00, #8 15:35 이후)
+        # [D] 정시 배치 알림 발송 (mention=True로 @everyone 푸시 발송)
         # ==================================================================
         slot_6 = None
-        if 1100 <= hhmm <= 1130:
+        if 1100 <= hhmm < 1300:
             slot_6 = "BATCH_6_1100"
-        elif 1430 <= hhmm < 1500:
+        elif 1420 <= hhmm < 1535:
             slot_6 = "BATCH_6_1430"
 
         if etf_valid and slot_6 and batch_6_candidates and can_fire_once(state, "MARKET", slot_6):
@@ -1768,6 +1747,7 @@ def main():
                     ),
                     "inline": False,
                 }],
+                mention=True,
             )
             if sent_ok:
                 commit_once(state, "MARKET", slot_6)
@@ -1785,7 +1765,7 @@ def main():
                     )
                 sent_count += 1
 
-        if etf_valid and 1500 <= hhmm < 1535 and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_1500"):
+        if etf_valid and 1450 <= hhmm < 1535 and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_1500"):
             valid_7 = [it for it in batch_7_candidates if can_fire_cooldown(state, it["code"], "NEW_7_RS")]
             top5_7 = sorted(valid_7, key=lambda x: x["rs_growth"], reverse=True)[:5]
             if top5_7:
@@ -1813,6 +1793,7 @@ def main():
                         ),
                         "inline": False,
                     }],
+                    mention=True,
                 )
                 if sent_ok:
                     commit_once(state, "MARKET", "BATCH_7_1500")
@@ -1830,7 +1811,7 @@ def main():
                         )
                     sent_count += 1
 
-        # 8번: 15:35 이후 장 마감 브리핑 TOP 3 + 당일 active_setups 종가 동기화 (크론 지연 방어용 상한 해제)
+        # 8번: 15:35 이후 장 마감 브리핑 TOP 3 (통과 종목 있을 때만 @everyone 멘션)
         if hhmm >= 1535 and can_fire_once(state, "MARKET", "BATCH_8_CLOSING"):
             base_scores = {
                 "NEW_1": 30, "NEW_2": 30, "NEW_3": 25,
@@ -1994,6 +1975,7 @@ def main():
                         + footer_block
                     ),
                     color=9807270,
+                    mention=False,
                 )
             else:
                 top3 = sorted(scored_list, key=lambda x: x["score"], reverse=True)[:3]
@@ -2024,6 +2006,7 @@ def main():
                         ),
                         "inline": False,
                     }],
+                    mention=True,
                 )
             if sent_ok:
                 commit_once(state, "MARKET", "BATCH_8_CLOSING")
