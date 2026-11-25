@@ -1,11 +1,11 @@
 """
-[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9)]
+[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.1)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
 - 핵심 검증 반영:
   1. MarketType 컬럼 명시 할당으로 KeyError 원천 차단
   2. 마감 브리핑(15:55~16:15) 재검증 강화: NEW_6 지수 -1.0% 이하 유지 확인 & NEW_4 마감 RVOL <= 120% 확인
-  3. ETF/KR 등락률 스케일(% vs 소수점) 자동 검증 및 실행 로그 출력
-  4. 주간 전체 일봉(3,000봉) 대량 재조회 시 스레드 자동 조절(max_workers=4)로 수집 안정성 확보
+  3. ETF/KR 등락률 스케일(% vs 소수점) 자동 검증, 실행 로그 출력 및 배치 시차 폴백 보완
+  4. 전일 종가 대비 장중 등락률(chg) 직접 산출 및 거래대금(Amount) 0원 폴백 보강
   5. 005930 기본 일봉 기반 휴장일 가드 + KRX: 수정주가 런타임 자동 검증 + signal_history.csv 주간 집계
 """
 
@@ -535,7 +535,7 @@ def _parse_etf_pct(row, chg_col):
 def fetch_top_universe_and_etf(state, hhmm):
     """
     코스피200 + 코스닥200 조회 (MarketType 명시 할당) + 기존 감시종목 이탈 방지 유지
-    + ETF/KR(069500, 229200) 등락률 스케일 검증·로그 출력 및 20분 지연 시차 동기화
+    + ETF/KR(069500, 229200) 등락률 스케일 검증·로그 출력 및 20분 지연 시차 동기화(폴백 포함)
     """
     tracked_codes = {st["code"] for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
 
@@ -611,6 +611,8 @@ def fetch_top_universe_and_etf(state, hhmm):
                         best_item = item
         if best_item:
             aligned_etf = {"069500": best_item["069500"], "229200": best_item["229200"]}
+        elif "069500" in etf_now and "229200" in etf_now:
+            aligned_etf = etf_now
     else:
         if "069500" in etf_now and "229200" in etf_now:
             aligned_etf = etf_now
@@ -1072,21 +1074,26 @@ def main():
             if c <= 0:
                 continue
 
+            lv = state["levels"].get(code)
+            if not lv:
+                continue
+
             o = float(row["Open"]) if ("Open" in row and pd.notna(row["Open"]) and row["Open"] > 0) else c
             h_raw = float(row["High"]) if ("High" in row and pd.notna(row["High"]) and row["High"] > 0) else c
             l_raw = float(row["Low"]) if ("Low" in row and pd.notna(row["Low"]) and row["Low"] > 0) else c
             h = max(h_raw, c, o)
             l = min(l_raw, c, o)
 
-            chg = float(row["ChagesRatio"]) if pd.notna(row["ChagesRatio"]) else 0.0
-            v = float(row["Volume"]) if pd.notna(row["Volume"]) else 0.0
-            amt = float(row["Amount"]) if pd.notna(row["Amount"]) else ((h + l + c) / 3.0) * v
+            if lv["prev_close"] > 0:
+                chg = ((c - lv["prev_close"]) / lv["prev_close"]) * 100.0
+            else:
+                chg = float(row["ChagesRatio"]) if ("ChagesRatio" in row and pd.notna(row["ChagesRatio"])) else 0.0
+
+            v = float(row["Volume"]) if ("Volume" in row and pd.notna(row["Volume"])) else 0.0
+            raw_amt = float(row["Amount"]) if ("Amount" in row and pd.notna(row["Amount"])) else 0.0
+            amt = raw_amt if raw_amt > 0 else ((h + l + c) / 3.0) * v
             amount_uk = int(amt / 100_000_000)
             clv = ((c - l) / (h - l)) if h > l else 0.5
-
-            lv = state["levels"].get(code)
-            if not lv:
-                continue
 
             avg_vol_20 = lv["avg_vol_20"]
             adv20 = lv["adv20"]
