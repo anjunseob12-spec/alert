@@ -1,11 +1,11 @@
 """
-[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.1)]
+[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.2)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
 - 핵심 검증 반영:
-  1. MarketType 컬럼 명시 할당으로 KeyError 원천 차단
-  2. 마감 브리핑(15:55~16:15) 재검증 강화: NEW_6 지수 -1.0% 이하 유지 확인 & NEW_4 마감 RVOL <= 120% 확인
-  3. ETF/KR 등락률 스케일(% vs 소수점) 자동 검증, 실행 로그 출력 및 배치 시차 폴백 보완
-  4. 전일 종가 대비 장중 등락률(chg) 직접 산출 및 거래대금(Amount) 0원 폴백 보강
+  1. 네이버 금융 장중 시세 일괄 동기화로 KRX StockListing 장중 정체(전일종가 고정) 문제 해결
+  2. MarketType 컬럼 명시 할당으로 KeyError 원천 차단
+  3. 마감 브리핑(15:55~16:15) 재검증 강화: NEW_6 지수 -1.0% 이하 유지 확인 & NEW_4 마감 RVOL <= 120% 확인
+  4. ETF/KR 등락률 스케일(% vs 소수점) 자동 검증, 실행 로그 출력 및 배치 시차 폴백 보완
   5. 005930 기본 일봉 기반 휴장일 가드 + KRX: 수정주가 런타임 자동 검증 + signal_history.csv 주간 집계
 """
 
@@ -200,7 +200,7 @@ def get_open_csv_codes():
                 elapsed = int(float(r.get("days_elapsed") or 0))
                 if r.get("outcome") == "OPEN" or elapsed < 5:
                     if r.get("code"):
-                        codes.add(str(r["code"]))
+                        codes.add(str(r["code"]).zfill(6))
     except Exception:
         pass
     return codes
@@ -269,7 +269,7 @@ def update_signal_csv_performance(state, live_snapshots, hhmm):
         if prev_elapsed >= 5 and r.get("d5_ret") != "":
             continue
 
-        snap = live_snapshots.get(r["code"])
+        snap = live_snapshots.get(str(r["code"]).zfill(6))
         if not snap:
             continue
 
@@ -532,16 +532,74 @@ def _parse_etf_pct(row, chg_col):
     return rate
 
 
+def fetch_naver_intraday_quotes(codes):
+    """네이버 금융 장중 시세 API로 400종목 시가/고가/저가/현재가/거래량/거래대금 일괄 조회"""
+    quotes = {}
+    code_list = list(dict.fromkeys(str(c).zfill(6) for c in codes if c))
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.naver.com/",
+    }
+    chunk_size = 80
+    for i in range(0, len(code_list), chunk_size):
+        chunk = code_list[i : i + chunk_size]
+        query = ",".join(f"SERVICE_ITEM:{c}" for c in chunk)
+        url = f"https://polling.finance.naver.com/api/realtime?query={query}"
+        try:
+            res = requests.get(url, headers=headers, timeout=10)
+            res.raise_for_status()
+            areas = res.json().get("result", {}).get("areas", [])
+            for area in areas:
+                for item in area.get("datas", []):
+                    cd = str(item.get("cd", "")).zfill(6)
+                    nv = float(item.get("nv") or 0)
+                    if not cd or nv <= 0:
+                        continue
+                    ov = float(item.get("ov") or nv)
+                    hv = float(item.get("hv") or nv)
+                    lv = float(item.get("lv") or nv)
+                    aq = float(item.get("aq") or 0)
+                    aa = float(item.get("aa") or 0)
+                    sv = float(item.get("sv") or 0)
+                    cr = float(item.get("cr") or 0)
+
+                    est_amt = ((hv + lv + nv) / 3.0) * aq
+                    if aa > 0 and est_amt > 0:
+                        if 0.2 <= (aa * 1_000_000.0) / est_amt <= 5.0:
+                            amt = aa * 1_000_000.0
+                        elif 0.2 <= aa / est_amt <= 5.0:
+                            amt = aa
+                        else:
+                            amt = est_amt
+                    else:
+                        amt = est_amt
+
+                    quotes[cd] = {
+                        "Close": nv,
+                        "Open": ov if ov > 0 else nv,
+                        "High": hv if hv > 0 else nv,
+                        "Low": lv if lv > 0 else nv,
+                        "Volume": aq,
+                        "Amount": amt,
+                        "ChagesRatio": cr,
+                        "NaverPrevClose": sv,
+                    }
+        except Exception as e:
+            print(f"네이버 장중 시세 배치 조회 오류({i}~{i+len(chunk)}): {e}")
+    return quotes
+
+
 def fetch_top_universe_and_etf(state, hhmm):
     """
-    코스피200 + 코스닥200 조회 (MarketType 명시 할당) + 기존 감시종목 이탈 방지 유지
-    + ETF/KR(069500, 229200) 등락률 스케일 검증·로그 출력 및 20분 지연 시차 동기화(폴백 포함)
+    코스피200 + 코스닥200 유니버스 조회 + 네이버 금융 장중 시세 일괄 동기화
+    + ETF/KR(069500, 229200) 등락률 스케일 검증·로그 출력 및 20분 지연 시차 동기화
     """
-    tracked_codes = {st["code"] for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
+    tracked_codes = {str(st["code"]).zfill(6) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
 
     frames = []
     for market in ["KOSPI", "KOSDAQ"]:
         df = fdr.StockListing(market).copy()
+        df["Code"] = df["Code"].astype(str).str.zfill(6)
         df["MarketType"] = market
         if CONFIG["EXCLUDE_PREFERRED"]:
             df = df[df["Code"].str.endswith("0")]
@@ -560,10 +618,31 @@ def fetch_top_universe_and_etf(state, hhmm):
         else:
             frames.append(top_df)
 
-    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Code"], keep="first")
+    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
     for col in ["Open", "High", "Close", "Low", "ChagesRatio", "Volume", "Amount"]:
-        if col in combined.columns:
-            combined[col] = pd.to_numeric(combined[col], errors="coerce")
+        if col not in combined.columns:
+            combined[col] = 0.0
+        combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float64")
+
+    # KRX StockListing의 장중 전일종가 고정을 방지하기 위해 네이버 금융 장중 시세로 덮어쓰기
+    live_quotes = fetch_naver_intraday_quotes(combined["Code"].tolist())
+    if live_quotes:
+        for idx, row in combined.iterrows():
+            cd = str(row["Code"]).zfill(6)
+            q = live_quotes.get(cd)
+            if q:
+                combined.at[idx, "Close"] = q["Close"]
+                combined.at[idx, "Open"] = q["Open"]
+                combined.at[idx, "High"] = q["High"]
+                combined.at[idx, "Low"] = q["Low"]
+                combined.at[idx, "Volume"] = q["Volume"]
+                combined.at[idx, "Amount"] = q["Amount"]
+                combined.at[idx, "ChagesRatio"] = q["ChagesRatio"]
+        sample_ss = live_quotes.get("005930")
+        sample_txt = f" | 삼성전자 {sample_ss['ChagesRatio']:+.2f}%" if sample_ss else ""
+        print(f"장중 시세 동기화: {len(live_quotes)}/{len(combined)}종목{sample_txt}")
+    else:
+        print("경고: 네이버 장중 시세 조회 실패 -> KRX 기본 목록 값 사용")
 
     etf_now = {}
     try:
@@ -859,7 +938,7 @@ def ensure_daily_levels(state, df):
 
     missing = []
     for _, row in df.iterrows():
-        code = str(row["Code"])
+        code = str(row["Code"]).zfill(6)
         if code not in state["levels"]:
             c_low = hist_lows_cache.get(code)
             need_full = _need_full_hist_refresh(today_str, hist_low_dates.get(code), c_low)
@@ -950,7 +1029,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
             to_remove.append(key)
             continue
 
-        code = st["code"]
+        code = str(st["code"]).zfill(6)
         snap = live_snapshots.get(code)
         lv = state["levels"].get(code)
         if not snap or not lv:
@@ -1065,7 +1144,7 @@ def main():
         buffer_mult = 1.0 + (CONFIG["LOW_TOUCH_BUFFER_PCT"] / 100.0)
 
         for _, row in df.iterrows():
-            code = str(row["Code"])
+            code = str(row["Code"]).zfill(6)
             name = str(row["Name"])
             market_type = row["MarketType"]
             in_top200 = bool(row["InTop200"]) if "InTop200" in row else True
