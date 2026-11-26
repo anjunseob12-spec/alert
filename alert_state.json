@@ -24,7 +24,8 @@
       "DROP_-5.0"
     ],
     "286750": [
-      "HIST_LOW"
+      "HIST_LOW",
+      "DROP_-5.0"
     ],
     "190510": [
       "VOL_SURGE"
@@ -9303,7 +9304,7 @@
     "target_cnt": 200,
     "levels_ok": 198,
     "krx_cnt": 0,
-    "fb_cnt": 210,
+    "fb_cnt": 213,
     "fail_cnt": 0
   }
 }
