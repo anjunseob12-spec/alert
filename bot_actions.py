@@ -1,13 +1,13 @@
 """
-[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v12.0)]
+[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v12.1)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
-- 주요 반영 (v12.0):
-  1. 네이버 모바일 basic API 기반 공식 기준가(전일 종가) 직접 산출 및 일일 캐시 (애프터마켓·권리락 오탐 차단)
+- 주요 반영 (v12.1):
+  1. 네이버 모바일 basic API 기반 공식 기준가(전일 종가) 직접 산출 및 0.5% 교차검증(권리락·배당락 오탐 차단)
   2. 배포 당일 버전 변경 시 alerted/cooldowns 보존 + universe/levels/index_base 초기화로 크래시 방지
   3. 네이버 모바일 시총 JSON API 폴백 + endswith("0") 우선주 필터 + 수정주가 리셋 카운터
   4. hhmm_add() 60진법 시간 연산, fchart 005930 직전 거래일 교차검증, 지수 복구 시 RS 캐시 재계산
   5. 기본 경보 심각도 우선순위 정렬 다이제스트 + 실제 표출 항목만 상태 커밋
-  6. volume_curve_history.csv 장중 누적 거래량 비율 실측 저장 및 N일 평균 RVOL 보정
+  6. 정규장(09:00~15:30) 전용 volume_curve_history.csv 누적 및 N일 평균 RVOL 보정
   7. 특수 장 운영일 수동 테이블(SPECIAL_SESSIONS) 적용 및 일목균형표 25봉 시점 일치
 """
 
@@ -134,7 +134,6 @@ def load_state():
                 data = json.load(f)
             if data.get("date") == today:
                 if data.get("version") != CURRENT_VERSION:
-                    # 배포 당일 버전 변경 시 중복 방지 기록은 유지하고 캐시 스키마만 안전 초기화
                     for keep_key in (
                         "alerted", "cooldowns", "today_signals", "active_setups",
                         "hist_lows", "hist_low_dates", "trading_dates",
@@ -884,7 +883,6 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes):
                 break
             time.sleep(0.15)
 
-    # 모바일 API가 막혔을 경우 레거시 HTML 2차 폴백
     if len(rows) < CONFIG["TOP_N"]:
         sosok = "0" if market == "KOSPI" else "1"
         with requests.Session() as session:
@@ -1073,7 +1071,6 @@ def _need_full_hist_refresh(code, today_str, last_refreshed_str, cached_hist_low
     try:
         d1 = datetime.strptime(last_refreshed_str, "%Y-%m-%d")
         d2 = datetime.strptime(today_str, "%Y-%m-%d")
-        # 평일(거래일) 기준 분산: 주말 몰림 없이 5개 버킷으로 균등 분산
         bdays = len(pd.bdate_range(d1, d2)) - 1
         if bdays < 5:
             return False
@@ -1332,7 +1329,6 @@ def ensure_daily_levels(state, df):
         if code in short_hist_set or retries.get(code, 0) >= 2:
             continue
         existing_lv = state["levels"].get(code)
-        # 첫 실행 때 지수 히스토리가 무효해 RS=0으로 캐시됐고 이후 지수가 복구된 경우 재계산 허용
         need_rs_rebuild = (
             existing_lv is not None
             and idx_hist_ok
@@ -1570,7 +1566,6 @@ def flush_basic_alerts(webhook_url, state, basic_alerts):
     if not basic_alerts:
         return 0
 
-    # 심각도 순 정렬: -15% > -10% > 역사적저점 > -5% > 거래폭발 > 스윙전저점
     sorted_alerts = sorted(basic_alerts, key=lambda x: (x.get("priority", 99), -abs(x.get("abs_chg", 0.0))))
 
     sent = 0
@@ -1677,7 +1672,7 @@ def main():
             if not lv:
                 continue
 
-            # 수정주가(권리락·액면분할) 감지: 18% 이상 괴리 시 캐시 삭제 + 재시도 카운터 증가로 무한루프 차단
+            # 수정주가(액면분할·감자 등) 감지: 18% 이상 괴리 시 캐시 삭제 + 재시도 카운터 증가
             naver_prev = float(row["NaverPrevClose"]) if ("NaverPrevClose" in row and pd.notna(row["NaverPrevClose"])) else 0.0
             if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.18:
                 state.get("hist_lows", {}).pop(code, None)
@@ -1686,10 +1681,17 @@ def main():
                 retries[code] = retries.get(code, 0) + 1
                 continue
 
-            # 기준가 결정: 1순위 basic API 기준가 -> 2순위 검증된 ListingClose -> 3순위 수정 전일종가
+            # 기준가 결정: 1순위 basic API 기준가(2.5% 이내 또는 naver_prev 0.5% 일치 시 18% 이내 권리락·배당락 허용)
             api_base_p = float(base_prices_cache.get(code, 0.0))
             listing_close = float(row["ListingClose"]) if ("ListingClose" in row and pd.notna(row["ListingClose"])) else 0.0
-            if api_base_p > 0 and lv["prev_close"] > 0 and abs(api_base_p - lv["prev_close"]) / lv["prev_close"] <= 0.025:
+            api_confirmed = (
+                api_base_p > 0
+                and naver_prev > 0
+                and abs(api_base_p - naver_prev) / naver_prev <= 0.005
+            )
+            if api_base_p > 0 and lv["prev_close"] > 0 and (
+                abs(api_base_p - lv["prev_close"]) / lv["prev_close"] <= 0.025 or api_confirmed
+            ):
                 ref_prev_close = api_base_p
             elif listing_close > 0 and lv["prev_close"] > 0 and abs(listing_close - lv["prev_close"]) / lv["prev_close"] <= 0.015:
                 ref_prev_close = listing_close
@@ -2156,8 +2158,8 @@ def main():
                         "chg": chg, "rs_growth": rs_20_growth, "amount_uk": amount_uk,
                     })
 
-        # 장중 누적 거래량 프로파일 기록
-        if total_universe_vol > 0:
+        # 장중 누적 거래량 프로파일 기록 (정규 09:00~15:30 장만 실측 곡선에 반영)
+        if total_universe_vol > 0 and sched["open_hhmm"] == 900 and sched["close_hhmm"] == 1530:
             bucket_key = f"{hhmm // 10 * 10:04d}"
             state.setdefault("volume_curve_log", {})[bucket_key] = round(total_universe_vol, 0)
             if not is_intraday:
@@ -2407,7 +2409,7 @@ def main():
                     s_code = st["code"]
                     s_id = st["sig_id"]
                     snap = live_snapshots.get(s_code)
-                    if s_id == "NEW_7" and not idx_valid:
+                    if s_id in ("NEW_6", "NEW_7") and not idx_valid:
                         continue
                     survived = (s_code in closing_validated_map) and (s_id in closing_validated_map[s_code])
                     if not survived or not snap:
