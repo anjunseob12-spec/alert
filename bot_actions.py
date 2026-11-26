@@ -1,9 +1,12 @@
 """
-[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v9.9)]
+[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v10.0)]
+- 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
 - 핵심 반영:
-  1. KRX StockListing 해외 IP 차단/대형주(삼성전자·SK하이닉스) 누락 시 네이버 시총 순위 폴백
-  2. Discord 429 속도 제한 최대 6회 재시도 + 핵심 퀀트 시그널(1~8번, 후속 트리거) @everyone 멘션 알림
-  3. 15:35 이후 장중 개별 알림 차단 및 정시 배치 창구 확대
+  1. 09:05 개장 직후 감시 시작, 10:00 돌파 시그널, 15:35 장 마감 브리핑
+  2. 네이버 금융 실시간 일봉(fchart) 1순위 조회로 400종목 및 지수 ETF(069500·229200) 실시간 동기화
+  3. KRX 차단/누락 시 네이버 시총 폴백(400종목 안정 확보) + 당일 유니버스 일일 캐싱(state["universe"])
+  4. 수정주가(권리락·액면분할) 감지 시 levels·hist_lows 동시 초기화 및 자동 재계산
+  5. 장 마감 브리핑(BATCH_8) NEW_1 최소 목표가 여력 보장 & etf_valid 누락 시 NEW_7 오탐 방어
 """
 
 import os
@@ -11,7 +14,8 @@ import re
 import csv
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import as_completed
 from datetime import datetime, timezone, timedelta
 import requests
 from requests.adapters import HTTPAdapter
@@ -71,6 +75,7 @@ def load_state():
     default_state = {
         "date": today,
         "version": 10,
+        "universe": [],
         "alerted": {},
         "cooldowns": {},
         "hist_lows": {},
@@ -87,6 +92,7 @@ def load_state():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if data.get("date") == today and data.get("version") == 10:
+                data.setdefault("universe", [])
                 return data
             default_state["cooldowns"] = data.get("cooldowns", {})
             default_state["hist_lows"] = data.get("hist_lows", {})
@@ -651,33 +657,47 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes):
     rows = []
 
     with requests.Session() as session:
-        session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
-        for page in range(1, 15):
-            try:
-                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-                res = session.get(url, timeout=10)
-                res.encoding = "euc-kr"
-                matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', res.text)
-                for cd, nm in matches:
-                    if cd in seen:
-                        continue
-                    seen.add(cd)
-                    clean_nm = nm.strip()
-                    if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
-                        continue
-                    if (
-                        clean_nm.startswith(ETF_OR_SPAC_PREFIXES)
-                        or "스팩" in clean_nm
-                        or "ETN" in clean_nm
-                        or "ETF" in clean_nm
-                        or re.search(r"\d+호$", clean_nm)
-                    ):
-                        continue
-                    rows.append({"Code": cd, "Name": clean_nm, "MarketType": market})
-                if len(rows) >= CONFIG["TOP_N"] and tracked_codes.issubset(seen):
-                    break
-            except Exception as e:
-                print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
+        session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+            "Referer": "https://finance.naver.com/sise/sise_market_sum.naver",
+            "Accept-Language": "ko-KR,ko;q=0.9",
+        })
+        for page in range(1, 21):
+            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+            matches = []
+            for attempt in range(3):
+                try:
+                    res = session.get(url, timeout=10)
+                    res.raise_for_status()
+                    html = res.content.decode("cp949", errors="replace")
+                    matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', html)
+                    if matches:
+                        break
+                except Exception as e:
+                    if attempt == 2:
+                        print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
+                time.sleep(0.6 * (attempt + 1))
+
+            for cd, nm in matches:
+                if cd in seen:
+                    continue
+                seen.add(cd)
+                clean_nm = nm.strip()
+                if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
+                    continue
+                if (
+                    clean_nm.startswith(ETF_OR_SPAC_PREFIXES)
+                    or "스팩" in clean_nm
+                    or "ETN" in clean_nm
+                    or "ETF" in clean_nm
+                    or re.search(r"\d+호$", clean_nm)
+                ):
+                    continue
+                rows.append({"Code": cd, "Name": clean_nm, "MarketType": market})
+
+            if len(rows) >= CONFIG["TOP_N"] and (not tracked_codes or tracked_codes.issubset(seen) or page >= 15):
+                break
+            time.sleep(0.25)
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -692,48 +712,62 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes):
 
 
 def fetch_top_universe_and_etf(state):
-    tracked_codes = {str(st["code"]).zfill(6) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
+    cached_universe = state.get("universe") or []
+    if len(cached_universe) >= CONFIG["TOP_N"] * 2:
+        combined = pd.DataFrame(cached_universe)
+        print(f"당일 유니버스 캐시 사용 ({len(combined)}종목)")
+    else:
+        tracked_codes = {str(st["code"]).zfill(6) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
 
-    frames = []
-    for market in ["KOSPI", "KOSDAQ"]:
-        try:
-            df = fdr.StockListing(market).copy()
-            if "Code" not in df.columns and "Symbol" in df.columns:
-                df["Code"] = df["Symbol"]
-            df["Code"] = df["Code"].astype(str).str.zfill(6)
-            df["MarketType"] = market
-            if CONFIG["EXCLUDE_PREFERRED"]:
-                df = df[df["Code"].str.endswith("0")]
-            if "Marcap" in df.columns:
-                df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
-                df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
+        frames = []
+        for market in ["KOSPI", "KOSDAQ"]:
+            try:
+                df = fdr.StockListing(market).copy()
+                if "Code" not in df.columns and "Symbol" in df.columns:
+                    df["Code"] = df["Symbol"]
+                df["Code"] = df["Code"].astype(str).str.zfill(6)
+                df["MarketType"] = market
+                if CONFIG["EXCLUDE_PREFERRED"]:
+                    df = df[df["Code"].str.endswith("0")]
+                if "Marcap" in df.columns:
+                    df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
+                    df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
 
-            top_df = df.head(CONFIG["TOP_N"]).copy()
-            if market == "KOSPI" and not {"005930", "000660"}.issubset(set(top_df["Code"])):
-                raise ValueError("KRX KOSPI 대형주(삼성전자·SK하이닉스) 누락 감지")
-            if len(top_df) < CONFIG["TOP_N"]:
-                raise ValueError(f"KRX {market} 종목 수 부족 ({len(top_df)}종목)")
+                top_df = df.head(CONFIG["TOP_N"]).copy()
+                if market == "KOSPI" and not {"005930", "000660"}.issubset(set(top_df["Code"])):
+                    raise ValueError("KRX KOSPI 대형주(삼성전자·SK하이닉스) 누락 감지")
+                if len(top_df) < CONFIG["TOP_N"]:
+                    raise ValueError(f"KRX {market} 종목 수 부족 ({len(top_df)}종목)")
 
-            top_df["InTop200"] = True
-            top_df["MarketType"] = market
+                top_df["InTop200"] = True
+                top_df["MarketType"] = market
 
-            extra_df = df[df["Code"].isin(tracked_codes) & ~df["Code"].isin(top_df["Code"])].copy()
-            if not extra_df.empty:
-                extra_df["InTop200"] = False
-                extra_df["MarketType"] = market
-                frames.append(pd.concat([top_df, extra_df], ignore_index=True))
-            else:
-                frames.append(top_df)
-        except Exception as e:
-            print(f"KRX {market} 목록 조회 보완 -> 네이버 시총 순위 폴백 사용: {e}")
-            fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
-            if not fb_df.empty:
-                frames.append(fb_df)
+                extra_df = df[df["Code"].isin(tracked_codes) & ~df["Code"].isin(top_df["Code"])].copy()
+                if not extra_df.empty:
+                    extra_df["InTop200"] = False
+                    extra_df["MarketType"] = market
+                    frames.append(pd.concat([top_df, extra_df], ignore_index=True))
+                else:
+                    frames.append(top_df)
+            except Exception as e:
+                print(f"KRX {market} 목록 조회 보완 -> 네이버 시총 순위 폴백 사용: {e}")
+                fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
+                if len(fb_df) < CONFIG["TOP_N"]:
+                    time.sleep(2.0)
+                    retry_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
+                    if len(retry_df) > len(fb_df):
+                        fb_df = retry_df
+                print(f"네이버 폴백 {market} 확보: {len(fb_df)}종목")
+                if not fb_df.empty:
+                    frames.append(fb_df)
 
-    if not frames:
-        raise RuntimeError("코스피/코스닥 종목 목록 조회에 모두 실패했습니다.")
+        if not frames:
+            raise RuntimeError("코스피/코스닥 종목 목록 조회에 모두 실패했습니다.")
 
-    combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+        combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+        if len(combined) >= CONFIG["TOP_N"] * 2:
+            state["universe"] = combined[["Code", "Name", "MarketType", "InTop200"]].to_dict("records")
+
     for col in ["Open", "High", "Close", "Low", "ChagesRatio", "Volume", "Amount", "NaverPrevClose"]:
         if col not in combined.columns:
             combined[col] = 0.0
@@ -760,7 +794,7 @@ def fetch_top_universe_and_etf(state):
         sample_txt = f" | 삼성전자 {sample_ss['ChagesRatio']:+.2f}%" if sample_ss else ""
         print(f"실시간 시세 동기화: {synced_cnt}/{len(combined)}종목{sample_txt}")
     else:
-        print("경고: 네이버 실시간 시세 조회 실패 -> KRX 기본 목록 값 사용")
+        print("경고: 네이버 실시간 시세 조회 실패 -> 기본 목록 값 사용")
 
     etf_now = {}
     for etf_cd in ["069500", "229200"]:
@@ -1236,6 +1270,7 @@ def main():
             if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.05:
                 state.get("hist_lows", {}).pop(code, None)
                 state.get("hist_low_dates", {}).pop(code, None)
+                state.get("levels", {}).pop(code, None)
                 continue
 
             o = float(row["Open"]) if ("Open" in row and pd.notna(row["Open"]) and row["Open"] > 0) else c
@@ -1841,7 +1876,8 @@ def main():
                         pl = lv["sweep_pl"]
                         ok = (pl > 0 and pl * 0.97 <= l < pl and c >= pl * 1.005 and c > o and clv >= 0.6)
                         recalc_meta["stop"] = l
-                        recalc_meta["target"] = snap["ma20"] if snap["ma20"] > c else snap["hh20"]
+                        raw_t1 = snap["ma20"] if snap["ma20"] > c * 1.05 else max(snap["hh20"], lv["hh60"])
+                        recalc_meta["target"] = max(raw_t1, c * 1.08)
                         recalc_meta["buy_zone"] = f"{int(pl):,}~{int(c):,}원"
                     elif sig_id == "NEW_2":
                         r_line = max(snap["ma60"], snap["ma120"])
@@ -1883,7 +1919,8 @@ def main():
                         recalc_meta["target"] = h * 1.08
                         recalc_meta["buy_zone"] = f"{int(h):,}원 돌파 시"
                     elif sig_id == "NEW_7":
-                        ok = (snap["rs_today"] > lv["max_rs_120"] and c < lv["hh120"] and c > snap["ma60"])
+                        rs_ok = (snap["rs_today"] > lv["max_rs_120"]) if etf_valid else True
+                        ok = (rs_ok and c < lv["hh120"] and c > snap["ma60"])
                         recalc_meta["stop"] = snap["ma20"]
                         recalc_meta["target"] = lv["hh120"]
                         recalc_meta["buy_zone"] = f"20일선({int(snap['ma20']):,}원) 눌림 or {int(lv['hh120']):,}원 돌파"
