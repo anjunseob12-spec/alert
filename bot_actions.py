@@ -1,12 +1,14 @@
 """
-[코스피200 · 코스닥200 올인원 스마트 알림 봇 (bot_actions.py - v10.0)]
+[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v11.0)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
-- 핵심 반영:
-  1. 09:05 개장 직후 감시 시작, 10:00 돌파 시그널, 15:35 장 마감 브리핑
-  2. 네이버 금융 실시간 일봉(fchart) 1순위 조회로 400종목 및 지수 ETF(069500·229200) 실시간 동기화
-  3. KRX 차단/누락 시 네이버 시총 폴백(400종목 안정 확보) + 당일 유니버스 일일 캐싱(state["universe"])
-  4. 수정주가(권리락·액면분할) 감지 시 levels·hist_lows 동시 초기화 및 자동 재계산
-  5. 장 마감 브리핑(BATCH_8) NEW_1 최소 목표가 여력 보장 & etf_valid 누락 시 NEW_7 오탐 방어
+- 핵심 개선 (v11.0):
+  1. KRX 애프터마켓(16:00~20:00) 대비 공식 전일 종가(ListingClose) 보존 및 불일치 검증 로그
+  2. ETF/KR 실제 종목코드 집합 기반 필터링 (BNK금융지주·HK이노엔 등 정상주 누락 방지)
+  3. 비캐시 첫 실행 시 어제 거래량 혼입(VOL_SURGE 오탐) 완전 차단
+  4. 직전 거래일(STALE) 검증, 신규 IPO(130일 미만) 당일 스킵, 7일 주기 전체조회 분산, 원자적 JSON 저장
+  5. 코스피·코스닥 종합지수 fchart 실시간 직접 조회로 RS(상대강도) 정확도 확보
+  6. KRX 장중 U자 거래량 곡선, 목표가/손익비 일원화, 트리거 발동(NEW_4T/6T/7T) CSV 별도 기록
+  7. 특수 장 운영일(수능일·새해 첫 거래일) 자동 시간 보정 및 일목균형표 25봉 시점 일치
 """
 
 import os
@@ -14,8 +16,7 @@ import re
 import csv
 import json
 import time
-from concurrent.futures import ThreadPoolExecutor
-from concurrent.futures import as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone, timedelta
 import requests
 from requests.adapters import HTTPAdapter
@@ -32,13 +33,12 @@ CSV_HEADERS = [
     "days_elapsed", "d1_ret", "d5_ret", "max_high", "min_low", "outcome"
 ]
 
-ETF_OR_SPAC_PREFIXES = (
-    "KODEX", "TIGER", "RISE", "ACE", "SOL", "KBSTAR", "HANARO",
-    "KOSEF", "KIWOOM", "PLUS", "TIMEFOLIO", "ARIRANG", "WOORI",
-    "BNK", "히어로즈", "TREX", "SMART", "FOCUS", "VITA", "MASTER",
-    "파워", "마이티", "에셋플러스", "마이다스", "하나로", "코세프",
-    "KoAct", "1Q", "WON", "UNICORN", "HK"
-)
+# 특수 장 운영일 수동 테이블 ("YYYY-MM-DD": (개장HHMM, 마감HHMM))
+SPECIAL_SESSIONS = {
+    "2026-11-19": (1000, 1630),
+    "2027-01-04": (1000, 1530),
+    "2027-11-18": (1000, 1630),
+}
 
 CONFIG = {
     "TOP_N": 200,
@@ -53,7 +53,13 @@ CONFIG = {
     "MIN_ADV20_KRW": 10_000_000_000,
     "COOLDOWN_TRADING_DAYS": 5,
     "HIST_LOW_REFRESH_DAYS": 7,
+    "MAX_INDIVIDUAL_BASIC_ALERTS": 4,
 }
+
+
+def _norm_code(val):
+    s = str(val).strip().upper()
+    return s.zfill(6) if s.isdigit() else s
 
 
 def _safe_float(val, default=0.0):
@@ -70,12 +76,35 @@ def _safe_float(val, default=0.0):
         return default
 
 
+def get_session_schedule(date_str):
+    open_hhmm, close_hhmm = SPECIAL_SESSIONS.get(date_str, (900, 1530))
+    open_h, open_m = divmod(open_hhmm, 100)
+    close_h, close_m = divmod(close_hhmm, 100)
+    total_min = float((close_h * 60 + close_m) - (open_h * 60 + open_m))
+    start_check = open_h * 100 + (open_m + 5)
+    after_1h = (open_h + 1) * 100 + open_m
+    closing_check = close_h * 100 + (close_m + 5)
+    return {
+        "open_hhmm": open_hhmm,
+        "close_hhmm": close_hhmm,
+        "open_h": open_h,
+        "open_m": open_m,
+        "total_min": max(60.0, total_min),
+        "start_check": start_check,
+        "after_1h": after_1h,
+        "closing_check": closing_check,
+    }
+
+
 def load_state():
     today = datetime.now(KST).strftime("%Y-%m-%d")
     default_state = {
         "date": today,
-        "version": 10,
+        "version": 11,
         "universe": [],
+        "short_hist": [],
+        "level_retries": {},
+        "volume_curve_log": {},
         "alerted": {},
         "cooldowns": {},
         "hist_lows": {},
@@ -91,8 +120,10 @@ def load_state():
         try:
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
-            if data.get("date") == today and data.get("version") == 10:
-                data.setdefault("universe", [])
+            if data.get("date") == today:
+                for k, v in default_state.items():
+                    data.setdefault(k, v)
+                data["version"] = 11
                 return data
             default_state["cooldowns"] = data.get("cooldowns", {})
             default_state["hist_lows"] = data.get("hist_lows", {})
@@ -105,8 +136,10 @@ def load_state():
 
 
 def save_state(state):
-    with open(STATE_FILE, "w", encoding="utf-8") as f:
+    tmp = STATE_FILE + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, ensure_ascii=False, indent=2)
+    os.replace(tmp, STATE_FILE)
 
 
 def can_fire_once(state, code, event_key):
@@ -210,7 +243,7 @@ def get_open_csv_codes():
                 elapsed = int(float(r.get("days_elapsed") or 0))
                 if r.get("outcome") == "OPEN" or elapsed < 5:
                     if r.get("code"):
-                        codes.add(str(r["code"]).zfill(6))
+                        codes.add(_norm_code(r["code"]))
     except Exception:
         pass
     return codes
@@ -249,7 +282,31 @@ def append_signal_csv(date_str, code, name, market, sig_id, sig_label, entry_pri
         writer.writerows(rows)
 
 
-def update_signal_csv_performance(state, live_snapshots, hhmm):
+def sync_closing_csv_targets(date_str, validated_map):
+    if not os.path.exists(CSV_FILE) or not validated_map:
+        return
+    with open(CSV_FILE, "r", newline="", encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+
+    changed = False
+    for r in rows:
+        if r["date"] == date_str:
+            code = _norm_code(r["code"])
+            sig_id = r["sig_id"]
+            if code in validated_map and sig_id in validated_map[code]:
+                meta = validated_map[code][sig_id]
+                r["stop_price"] = round(float(meta["stop"]), 2)
+                r["target_price"] = round(float(meta["target"]), 2)
+                changed = True
+
+    if changed:
+        with open(CSV_FILE, "w", newline="", encoding="utf-8-sig") as f:
+            writer = csv.DictWriter(f, fieldnames=CSV_HEADERS)
+            writer.writeheader()
+            writer.writerows(rows)
+
+
+def update_signal_csv_performance(state, live_snapshots, is_closing):
     ensure_csv_exists()
     with open(CSV_FILE, "r", newline="", encoding="utf-8-sig") as f:
         rows = list(csv.DictReader(f))
@@ -258,7 +315,6 @@ def update_signal_csv_performance(state, live_snapshots, hhmm):
         return
 
     today = state["date"]
-    is_closing = (hhmm >= 1535)
     changed = False
 
     for r in rows:
@@ -274,7 +330,7 @@ def update_signal_csv_performance(state, live_snapshots, hhmm):
         if prev_elapsed >= 5 and r.get("d5_ret") != "":
             continue
 
-        snap = live_snapshots.get(str(r["code"]).zfill(6))
+        snap = live_snapshots.get(_norm_code(r["code"]))
         if not snap:
             continue
 
@@ -306,7 +362,7 @@ def update_signal_csv_performance(state, live_snapshots, hhmm):
 
         if is_closing:
             ret_pct = round(((c / entry_p) - 1.0) * 100.0, 2) if entry_p > 0 else 0.0
-            if diff == 1 and r.get("d1_ret") == "":
+            if diff >= 1 and r.get("d1_ret") == "":
                 r["d1_ret"] = ret_pct
                 changed = True
             if diff >= 5 and r.get("d5_ret") == "":
@@ -340,25 +396,28 @@ def build_weekly_performance_summary():
     by_sig = {}
     for r in aged:
         label = r["sig_label"]
-        grp = by_sig.setdefault(label, {"cnt": 0, "d1": [], "d5": [], "target": 0, "stop": 0})
+        grp = by_sig.setdefault(label, {"cnt": 0, "closed": 0, "d1": [], "d5": [], "target": 0, "stop": 0})
         grp["cnt"] += 1
         if r.get("d1_ret") != "":
             grp["d1"].append(float(r["d1_ret"]))
         if r.get("d5_ret") != "":
             grp["d5"].append(float(r["d5_ret"]))
+        if r["outcome"] != "OPEN":
+            grp["closed"] += 1
         if r["outcome"] in ("TARGET_HIT", "BOTH_HIT"):
             grp["target"] += 1
         if r["outcome"] in ("STOP_HIT", "BOTH_HIT"):
             grp["stop"] += 1
 
-    lines = ["📊 **주간 시그널 누적 성과 집계 (D+1 이상 표본 기준)**"]
+    lines = ["📊 **주간 시그널 누적 성과 집계 (D+1 이상 표본 · 종료건 기준)**"]
     for label, g in sorted(by_sig.items()):
         d1_avg = f"{sum(g['d1'])/len(g['d1']):+.2f}%" if g["d1"] else "-"
         d5_avg = f"{sum(g['d5'])/len(g['d5']):+.2f}%" if g["d5"] else "-"
-        t_rate = (g["target"] / g["cnt"]) * 100.0
-        s_rate = (g["stop"] / g["cnt"]) * 100.0
+        denom = g["closed"] if g["closed"] > 0 else g["cnt"]
+        t_rate = (g["target"] / denom) * 100.0
+        s_rate = (g["stop"] / denom) * 100.0
         lines.append(
-            f"• `{label}` ({g['cnt']}건): D+1 `{d1_avg}` | D+5 `{d5_avg}` | 목표도달 `{t_rate:.0f}%` / 손절 `{s_rate:.0f}%`"
+            f"• `{label}` ({g['cnt']}건/종료{g['closed']}): D+1 `{d1_avg}` | D+5 `{d5_avg}` | 목표 `{t_rate:.0f}%` / 손절 `{s_rate:.0f}%`"
         )
     return "\n".join(lines)
 
@@ -394,8 +453,11 @@ def send_discord_embed(webhook_url, title, description, color, fields=None, auth
                     retry_after = 2.5
                 time.sleep(retry_after + 1.0)
                 continue
+            if 400 <= res.status_code < 500:
+                print(f"디스코드 4xx 클라이언트 오류 ({res.status_code}) 즉시 중단: {res.text[:300]}")
+                return False
             res.raise_for_status()
-            time.sleep(1.2)
+            time.sleep(1.1)
             return True
         except Exception as e:
             print(f"디스코드 전송 오류: {e}")
@@ -404,7 +466,7 @@ def send_discord_embed(webhook_url, title, description, color, fields=None, auth
 
 
 def send_individual_card(webhook_url, market_type, title, meaning, action_guide, color, fields, mention=False):
-    author_text = "🔵 코스피 200 (KOSPI)" if market_type == "KOSPI" else "🟠 코스닥 200 (KOSDAQ)"
+    author_text = "🔵 코스피 시총 TOP 200 (KOSPI)" if market_type == "KOSPI" else "🟠 코스닥 시총 TOP 200 (KOSDAQ)"
     full_fields = list(fields) + [
         {
             "name": "🧭 지금 해야 할 행동 / 체크포인트",
@@ -423,45 +485,20 @@ def send_individual_card(webhook_url, market_type, title, meaning, action_guide,
     )
 
 
-def _verify_krx_adjusted():
-    try:
-        df = fdr.DataReader("KRX:005930", "2017-06-01")
-        if df is None or len(df) < 100:
-            return False
-        pre_split = df[df.index < "2018-05-04"]["Close"].astype(float)
-        if len(pre_split) == 0:
-            return False
-        if float(pre_split.max()) > 200_000:
-            print("KRX: 소스 무수정주가 감지 -> 기본 수정주가 일봉 사용")
-            return False
-        return True
-    except Exception:
-        return False
-
-
-def _fetch_daily_ohlcv(code, start_date=None, use_krx_prefix=False):
-    if use_krx_prefix:
-        try:
-            df = fdr.DataReader(f"KRX:{code}", start_date) if start_date else fdr.DataReader(f"KRX:{code}")
-            if df is not None and len(df) > 0:
-                return df, "KRX"
-        except Exception:
-            pass
-
+def _fetch_daily_ohlcv(code, start_date=None):
     try:
         df = fdr.DataReader(code, start_date) if start_date else fdr.DataReader(code)
         if df is not None and len(df) > 0:
-            return df, "FALLBACK"
+            return df, "FDR"
     except Exception:
         pass
-
     return None, "FAIL"
 
 
 def fetch_naver_intraday_quotes(codes):
     quotes = {}
     today_ymd = datetime.now(KST).strftime("%Y%m%d")
-    code_list = list(dict.fromkeys(str(c).zfill(6) for c in codes if c))
+    code_list = list(dict.fromkeys(_norm_code(c) for c in codes if c))
 
     session = requests.Session()
     adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
@@ -528,7 +565,7 @@ def fetch_naver_intraday_quotes(codes):
     return quotes
 
 
-def _fetch_index_history_fchart(idx_code, today_str):
+def _fetch_index_fchart_full(idx_code, today_str):
     sym = "KOSPI" if idx_code == "KS11" else "KOSDAQ"
     url = f"https://fchart.stock.naver.com/sise.nhn?symbol={sym}&timeframe=day&count=180&requestType=0"
     headers = {
@@ -540,6 +577,7 @@ def _fetch_index_history_fchart(idx_code, today_str):
         res.raise_for_status()
         items = re.findall(r'data="([^"]+)"', res.text)
         parsed = []
+        live_val = 0.0
         for item in items:
             parts = item.split("|")
             if len(parts) < 5:
@@ -548,47 +586,49 @@ def _fetch_index_history_fchart(idx_code, today_str):
             if len(raw_d) != 8 or not raw_d.isdigit():
                 continue
             d_str = f"{raw_d[:4]}-{raw_d[4:6]}-{raw_d[6:8]}"
-            if d_str >= today_str:
-                continue
             close_val = _safe_float(parts[4])
-            if close_val > 0:
+            if close_val <= 0:
+                continue
+            if d_str == today_str:
+                live_val = close_val
+            elif d_str < today_str:
                 parsed.append((d_str, close_val))
 
-        if len(parsed) < 130:
-            return None
-
-        recent = parsed[-140:]
-        return {
-            "prev_close": float(recent[-1][1]),
-            "last_date": recent[-1][0],
-            "closes_map": {d: float(c) for d, c in recent},
-        }
+        hist_entry = None
+        if len(parsed) >= 130:
+            recent = parsed[-140:]
+            hist_entry = {
+                "prev_close": float(recent[-1][1]),
+                "last_date": recent[-1][0],
+                "closes_map": {d: float(c) for d, c in recent},
+            }
+        return hist_entry, live_val
     except Exception as e:
-        print(f"지수({idx_code}) fchart 폴백 조회 오류: {e}")
-        return None
+        print(f"지수({idx_code}) fchart 조회 오류: {e}")
+        return None, 0.0
 
 
-def check_trading_day_and_index_history(state, hhmm):
-    if hhmm < 905:
-        print("09:05 이전(개장 전 및 초기 체결 안정화 대기 구간)이므로 종료합니다.")
-        return False
+def check_trading_day_and_index_history(state, hhmm, sched):
+    if hhmm < sched["start_check"]:
+        print(f"{sched['start_check']} 이전(개장 전 및 초기 체결 안정화 대기 구간)이므로 종료합니다.")
+        return False, {}
 
     today_str = state["date"]
     probe_live = fetch_naver_intraday_quotes(["005930"])
     if "005930" not in probe_live:
         print(f"오늘은 휴장일입니다 ({today_str} 삼성전자 장중 체결 없음). 알림 없이 종료합니다.")
-        return False
+        return False, {}
 
     start_date = (datetime.now(KST) - timedelta(days=430)).strftime("%Y-%m-%d")
     try:
         probe_df = fdr.DataReader("005930", start_date)
     except Exception as e:
         print(f"기준 종목(005930) 일봉 조회 실패로 안전 종료합니다: {e}")
-        return False
+        return False, {}
 
     if probe_df is None or len(probe_df) < 130:
         print("기준 종목(005930) 데이터 부족으로 안전 종료합니다.")
-        return False
+        return False, {}
 
     probe_dates = [str(d)[:10] for d in probe_df.index]
     if probe_dates[-1] != today_str:
@@ -596,62 +636,57 @@ def check_trading_day_and_index_history(state, hhmm):
     state["trading_dates"] = probe_dates[-160:]
     prev_trading_day = state["trading_dates"][-2] if len(state["trading_dates"]) >= 2 else ""
 
-    if state.get("index_base") and state["index_base"].get("valid"):
-        return True
+    need_hist = not (state.get("index_base") and state["index_base"].get("valid"))
+    idx_base = state.get("index_base", {}) if not need_hist else {"valid": True}
+    live_indices = {}
 
-    idx_base = {"valid": True}
     for idx_code in ["KS11", "KQ11"]:
-        entry = None
-        try:
-            raw_df = fdr.DataReader(idx_code, start_date)
-            if raw_df is not None and len(raw_df) >= 130:
-                df = raw_df.iloc[:-1] if str(raw_df.index[-1])[:10] == today_str else raw_df
-                last_idx_date = str(df.index[-1])[:10]
-                if not prev_trading_day or last_idx_date == prev_trading_day:
-                    closes = df["Close"].astype(float)
-                    dates = [str(d)[:10] for d in df.index]
-                    entry = {
-                        "prev_close": float(closes.iloc[-1]),
-                        "last_date": last_idx_date,
-                        "closes_map": {dates[i]: float(closes.iloc[i]) for i in range(max(0, len(dates) - 140), len(dates))},
-                    }
-        except Exception as e:
-            print(f"지수({idx_code}) FDR 조회 오류 -> fchart 폴백 시도: {e}")
+        fb_entry, live_val = _fetch_index_fchart_full(idx_code, today_str)
+        if live_val > 0:
+            live_indices[idx_code] = live_val
 
-        if entry is None:
-            fb_entry = _fetch_index_history_fchart(idx_code, today_str)
+        if need_hist:
+            entry = None
             if fb_entry and (not prev_trading_day or fb_entry["last_date"] == prev_trading_day):
                 entry = fb_entry
-                print(f"지수({idx_code}) 히스토리 fchart 폴백 복구 완료 (기준일: {entry['last_date']})")
+            else:
+                try:
+                    raw_df = fdr.DataReader(idx_code, start_date)
+                    if raw_df is not None and len(raw_df) >= 130:
+                        df = raw_df.iloc[:-1] if str(raw_df.index[-1])[:10] == today_str else raw_df
+                        last_idx_date = str(df.index[-1])[:10]
+                        if not prev_trading_day or last_idx_date == prev_trading_day:
+                            closes = df["Close"].astype(float)
+                            dates = [str(d)[:10] for d in df.index]
+                            entry = {
+                                "prev_close": float(closes.iloc[-1]),
+                                "last_date": last_idx_date,
+                                "closes_map": {dates[i]: float(closes.iloc[i]) for i in range(max(0, len(dates) - 140), len(dates))},
+                            }
+                except Exception as e:
+                    print(f"지수({idx_code}) FDR 조회 오류: {e}")
 
-        if entry is None:
-            print(f"경고: {idx_code} 히스토리 수집 실패 또는 직전 거래일({prev_trading_day}) 불일치")
-            idx_base["valid"] = False
-        else:
-            idx_base[idx_code] = entry
+            if entry is None:
+                print(f"경고: {idx_code} 히스토리 수집 실패 또는 직전 거래일({prev_trading_day}) 불일치")
+                idx_base["valid"] = False
+            else:
+                idx_base[idx_code] = entry
 
-    state["index_base"] = idx_base
-    return True
-
-
-def _parse_etf_pct(row, chg_col):
-    val = pd.to_numeric(row.get(chg_col), errors="coerce")
-    if pd.isna(val):
-        return None
-    rate = float(val)
-
-    price = pd.to_numeric(row.get("Price", row.get("Close")), errors="coerce")
-    change = pd.to_numeric(row.get("Change", row.get("Changes")), errors="coerce")
-    if pd.notna(price) and pd.notna(change):
-        prev_p = float(price) - float(change)
-        if prev_p > 0:
-            calc_pct = (float(change) / prev_p) * 100.0
-            if abs(calc_pct) > 0.05 and abs(rate * 100.0 - calc_pct) < abs(rate - calc_pct):
-                return round(rate * 100.0, 4)
-    return rate
+    if need_hist:
+        state["index_base"] = idx_base
+    return True, live_indices
 
 
-def _fetch_naver_market_cap_fallback(market, tracked_codes):
+def _get_etf_code_set():
+    try:
+        etf = fdr.StockListing("ETF/KR")
+        sym_col = "Symbol" if "Symbol" in etf.columns else "Code"
+        return {_norm_code(x) for x in etf[sym_col].dropna().tolist()}
+    except Exception:
+        return set()
+
+
+def _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes):
     sosok = "0" if market == "KOSPI" else "1"
     seen = set()
     rows = []
@@ -670,7 +705,7 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes):
                     res = session.get(url, timeout=10)
                     res.raise_for_status()
                     html = res.content.decode("cp949", errors="replace")
-                    matches = re.findall(r'href="/item/main\.naver\?code=(\d{6})"[^>]*>([^<]+)</a>', html)
+                    matches = re.findall(r'href="/item/main\.naver\?code=([0-9A-Za-z]{6})"[^>]*>([^<]+)</a>', html)
                     if matches:
                         break
                 except Exception as e:
@@ -678,22 +713,24 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes):
                         print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
                 time.sleep(0.6 * (attempt + 1))
 
-            for cd, nm in matches:
+            for raw_cd, nm in matches:
+                cd = _norm_code(raw_cd)
                 if cd in seen:
                     continue
                 seen.add(cd)
                 clean_nm = nm.strip()
-                if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
+                if cd in etf_codes:
+                    continue
+                if CONFIG["EXCLUDE_PREFERRED"] and cd.isdigit() and not cd.endswith("0"):
                     continue
                 if (
-                    clean_nm.startswith(ETF_OR_SPAC_PREFIXES)
-                    or "스팩" in clean_nm
+                    "스팩" in clean_nm
                     or "ETN" in clean_nm
                     or "ETF" in clean_nm
                     or re.search(r"\d+호$", clean_nm)
                 ):
                     continue
-                rows.append({"Code": cd, "Name": clean_nm, "MarketType": market})
+                rows.append({"Code": cd, "Name": clean_nm, "MarketType": market, "ListingClose": 0.0})
 
             if len(rows) >= CONFIG["TOP_N"] and (not tracked_codes or tracked_codes.issubset(seen) or page >= 15):
                 break
@@ -711,13 +748,17 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes):
     return top_df
 
 
-def fetch_top_universe_and_etf(state):
+def fetch_top_universe_and_etf(state, live_indices):
     cached_universe = state.get("universe") or []
+    is_fresh_listing = False
+
     if len(cached_universe) >= CONFIG["TOP_N"] * 2:
         combined = pd.DataFrame(cached_universe)
         print(f"당일 유니버스 캐시 사용 ({len(combined)}종목)")
     else:
-        tracked_codes = {str(st["code"]).zfill(6) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
+        is_fresh_listing = True
+        tracked_codes = {_norm_code(st["code"]) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
+        etf_codes = _get_etf_code_set()
 
         frames = []
         for market in ["KOSPI", "KOSDAQ"]:
@@ -725,13 +766,21 @@ def fetch_top_universe_and_etf(state):
                 df = fdr.StockListing(market).copy()
                 if "Code" not in df.columns and "Symbol" in df.columns:
                     df["Code"] = df["Symbol"]
-                df["Code"] = df["Code"].astype(str).str.zfill(6)
+                df["Code"] = df["Code"].apply(_norm_code)
                 df["MarketType"] = market
+
+                if etf_codes:
+                    df = df[~df["Code"].isin(etf_codes)]
                 if CONFIG["EXCLUDE_PREFERRED"]:
-                    df = df[df["Code"].str.endswith("0")]
+                    df = df[~df["Code"].str.isdigit() | df["Code"].str.endswith("0")]
                 if "Marcap" in df.columns:
                     df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
                     df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
+
+                if "Close" in df.columns:
+                    df["ListingClose"] = pd.to_numeric(df["Close"], errors="coerce").fillna(0.0)
+                else:
+                    df["ListingClose"] = 0.0
 
                 top_df = df.head(CONFIG["TOP_N"]).copy()
                 if market == "KOSPI" and not {"005930", "000660"}.issubset(set(top_df["Code"])):
@@ -740,21 +789,18 @@ def fetch_top_universe_and_etf(state):
                     raise ValueError(f"KRX {market} 종목 수 부족 ({len(top_df)}종목)")
 
                 top_df["InTop200"] = True
-                top_df["MarketType"] = market
-
                 extra_df = df[df["Code"].isin(tracked_codes) & ~df["Code"].isin(top_df["Code"])].copy()
                 if not extra_df.empty:
                     extra_df["InTop200"] = False
-                    extra_df["MarketType"] = market
                     frames.append(pd.concat([top_df, extra_df], ignore_index=True))
                 else:
                     frames.append(top_df)
             except Exception as e:
                 print(f"KRX {market} 목록 조회 보완 -> 네이버 시총 순위 폴백 사용: {e}")
-                fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
+                fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes)
                 if len(fb_df) < CONFIG["TOP_N"]:
                     time.sleep(2.0)
-                    retry_df = _fetch_naver_market_cap_fallback(market, tracked_codes)
+                    retry_df = _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes)
                     if len(retry_df) > len(fb_df):
                         fb_df = retry_df
                 print(f"네이버 폴백 {market} 확보: {len(fb_df)}종목")
@@ -765,20 +811,26 @@ def fetch_top_universe_and_etf(state):
             raise RuntimeError("코스피/코스닥 종목 목록 조회에 모두 실패했습니다.")
 
         combined = pd.concat(frames, ignore_index=True).drop_duplicates(subset=["Code"], keep="first").reset_index(drop=True)
+        keep_cols = ["Code", "Name", "MarketType", "InTop200", "ListingClose"]
+        for kc in keep_cols:
+            if kc not in combined.columns:
+                combined[kc] = 0.0 if kc == "ListingClose" else True
+        combined = combined[keep_cols].copy()
+
         if len(combined) >= CONFIG["TOP_N"] * 2:
-            state["universe"] = combined[["Code", "Name", "MarketType", "InTop200"]].to_dict("records")
+            state["universe"] = combined.to_dict("records")
 
+    # 어제 종가·거래량 혼입 방지를 위해 실시간 컬럼은 전부 0.0으로 초기화
     for col in ["Open", "High", "Close", "Low", "ChagesRatio", "Volume", "Amount", "NaverPrevClose"]:
-        if col not in combined.columns:
-            combined[col] = 0.0
-        combined[col] = pd.to_numeric(combined[col], errors="coerce").astype("float64")
+        combined[col] = 0.0
+    combined["ListingClose"] = pd.to_numeric(combined.get("ListingClose", 0.0), errors="coerce").fillna(0.0)
 
-    all_codes = combined["Code"].tolist() + ["069500", "229200"]
+    all_codes = combined["Code"].tolist()
     live_quotes = fetch_naver_intraday_quotes(all_codes)
     if live_quotes:
         synced_cnt = 0
         for idx, row in combined.iterrows():
-            cd = str(row["Code"]).zfill(6)
+            cd = _norm_code(row["Code"])
             q = live_quotes.get(cd)
             if q:
                 combined.at[idx, "Close"] = q["Close"]
@@ -793,77 +845,109 @@ def fetch_top_universe_and_etf(state):
         sample_ss = live_quotes.get("005930")
         sample_txt = f" | 삼성전자 {sample_ss['ChagesRatio']:+.2f}%" if sample_ss else ""
         print(f"실시간 시세 동기화: {synced_cnt}/{len(combined)}종목{sample_txt}")
+
+        if is_fresh_listing and (combined["ListingClose"] > 0).any():
+            valid_mask = (combined["ListingClose"] > 0) & (combined["NaverPrevClose"] > 0)
+            if valid_mask.any():
+                gap = (combined.loc[valid_mask, "NaverPrevClose"] / combined.loc[valid_mask, "ListingClose"] - 1.0).abs()
+                print(f"전일종가 불일치(>0.1%, 애프터마켓 영향 진단): {(gap > 0.001).sum()}/{valid_mask.sum()}종목")
     else:
-        print("경고: 네이버 실시간 시세 조회 실패 -> 기본 목록 값 사용")
+        print("경고: 네이버 실시간 시세 조회 실패 -> 금일 시세 없음으로 스킵")
 
-    etf_now = {}
-    for etf_cd in ["069500", "229200"]:
-        if etf_cd in live_quotes:
-            etf_now[etf_cd] = round(live_quotes[etf_cd]["ChagesRatio"], 4)
+    # 실시간 지수 계산 (fchart 직접 지수 우선, 부재 시 ETF 폴백)
+    idx_base = state.get("index_base", {})
+    idx_live_map = {}
+    idx_chg_map = {}
 
-    if len(etf_now) < 2:
-        try:
-            etf = fdr.StockListing("ETF/KR")
-            sym_col = "Symbol" if "Symbol" in etf.columns else "Code"
-            chg_col = "ChangeRate" if "ChangeRate" in etf.columns else "ChagesRatio"
-            sub = etf[etf[sym_col].astype(str).isin(["069500", "229200"])]
-            for _, r in sub.iterrows():
-                cd_str = str(r[sym_col])
-                if cd_str not in etf_now:
-                    pct_val = _parse_etf_pct(r, chg_col)
-                    if pct_val is not None:
-                        etf_now[cd_str] = pct_val
-        except Exception as e:
-            print(f"ETF/KR 폴백 조회 오류: {e}")
+    if idx_base.get("valid"):
+        for idx_code in ["KS11", "KQ11"]:
+            prev_idx = idx_base.get(idx_code, {}).get("prev_close", 0.0)
+            live_v = live_indices.get(idx_code, 0.0)
+            if prev_idx > 0 and live_v > 0:
+                idx_live_map[idx_code] = live_v
+                idx_chg_map[idx_code] = round(((live_v / prev_idx) - 1.0) * 100.0, 4)
 
-    print(f"실시간 지수ETF 등락률(%): {etf_now}")
-    return combined, etf_now, bool(etf_now)
+    if len(idx_chg_map) < 2 and idx_base.get("valid"):
+        etf_quotes = fetch_naver_intraday_quotes(["069500", "229200"])
+        for idx_code, etf_cd in [("KS11", "069500"), ("KQ11", "229200")]:
+            if idx_code not in idx_chg_map and etf_cd in etf_quotes:
+                prev_idx = idx_base.get(idx_code, {}).get("prev_close", 0.0)
+                pct = etf_quotes[etf_cd]["ChagesRatio"]
+                if prev_idx > 0:
+                    idx_chg_map[idx_code] = round(pct, 4)
+                    idx_live_map[idx_code] = prev_idx * (1.0 + pct / 100.0)
+
+    idx_valid = idx_base.get("valid", False) and ("KS11" in idx_chg_map) and ("KQ11" in idx_chg_map)
+    print(f"실시간 지수 등락률(%): {idx_chg_map} (valid={idx_valid})")
+    return combined, idx_valid, idx_live_map, idx_chg_map
 
 
-def _need_full_hist_refresh(today_str, last_refreshed_str, cached_hist_low):
+def _need_full_hist_refresh(code, today_str, last_refreshed_str, cached_hist_low):
     if cached_hist_low is None or cached_hist_low <= 0 or not last_refreshed_str:
         return True
     try:
         d1 = datetime.strptime(last_refreshed_str, "%Y-%m-%d")
         d2 = datetime.strptime(today_str, "%Y-%m-%d")
-        return (d2 - d1).days >= CONFIG["HIST_LOW_REFRESH_DAYS"]
+        days_passed = (d2 - d1).days
+        if days_passed < CONFIG["HIST_LOW_REFRESH_DAYS"]:
+            return False
+        # 400종목 전체 재조회가 하루에 몰리지 않도록 종목코드별 요일 분산 (최대 13일 내 분산 갱신)
+        if days_passed < CONFIG["HIST_LOW_REFRESH_DAYS"] + 6:
+            bucket = int(code, 36) % 7
+            return bucket == (d2.toordinal() % 7)
+        return True
     except Exception:
         return True
 
 
-def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low, need_full_refresh, use_krx_prefix):
+def _sanitize_ohlcv_zeros(df):
+    df = df.copy()
+    c = pd.to_numeric(df["Close"], errors="coerce")
+    for col in ["Open", "High", "Low"]:
+        s = pd.to_numeric(df[col], errors="coerce")
+        df[col] = s.where(s > 0, c)
+    return df
+
+
+def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low, need_full_refresh, prev_trading_day):
     try:
         today_str = datetime.now(KST).strftime("%Y-%m-%d")
 
         if need_full_refresh:
-            raw_hist, src = _fetch_daily_ohlcv(code, start_date=None, use_krx_prefix=use_krx_prefix)
-            if raw_hist is None or len(raw_hist) < 130:
-                return code, None, None, src
+            raw_hist, src = _fetch_daily_ohlcv(code, start_date=None)
+            if raw_hist is None or len(raw_hist) == 0:
+                return code, None, None, "FAIL"
             if str(raw_hist.index[-1])[:10] == today_str:
                 raw_hist = raw_hist.iloc[:-1]
+            if len(raw_hist) < 130:
+                return code, None, None, "SHORT_HIST"
+            raw_hist = _sanitize_ohlcv_zeros(raw_hist)
             valid_all_lows = raw_hist["Low"][raw_hist["Low"] > 0]
             hist_low = float(valid_all_lows.min()) if len(valid_all_lows) > 0 else 0.0
             hist = raw_hist.tail(320)
         else:
             start_date = (datetime.now(KST) - timedelta(days=430)).strftime("%Y-%m-%d")
-            hist, src = _fetch_daily_ohlcv(code, start_date=start_date, use_krx_prefix=use_krx_prefix)
-            if hist is None or len(hist) < 130:
-                return code, None, None, src
+            hist, src = _fetch_daily_ohlcv(code, start_date=start_date)
+            if hist is None or len(hist) == 0:
+                return code, None, None, "FAIL"
             if str(hist.index[-1])[:10] == today_str:
                 hist = hist.iloc[:-1]
+            if len(hist) < 130:
+                return code, None, None, "SHORT_HIST"
+            hist = _sanitize_ohlcv_zeros(hist)
             valid_430_lows = hist["Low"][hist["Low"] > 0]
             min_430 = float(valid_430_lows.min()) if len(valid_430_lows) > 0 else float(cached_hist_low)
             hist_low = min(float(cached_hist_low), min_430)
 
-        if len(hist) < 130:
-            return code, None, None, src
+        dates = [str(d)[:10] for d in hist.index]
+        if prev_trading_day and dates[-1] != prev_trading_day:
+            return code, None, None, "STALE"
 
         o = hist["Open"].astype(float)
         h = hist["High"].astype(float)
         l = hist["Low"].astype(float)
         c = hist["Close"].astype(float)
         v = hist["Volume"].astype(float)
-        dates = [str(d)[:10] for d in hist.index]
 
         if "Amount" in hist.columns and hist["Amount"].notna().sum() >= 20:
             amt = pd.to_numeric(hist["Amount"], errors="coerce").fillna(((h + l + c) / 3.0) * v)
@@ -913,21 +997,22 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
         ma60_10 = float(ma60_s.iloc[-10])
         ma120_20 = float(ma120_s.iloc[-20])
         c_5_ago = float(c.iloc[-5])
-        c_26_ago = float(c.iloc[-26])
+        c_25_ago = float(c.iloc[-25])
 
         r_s = pd.concat([ma60_s, ma120_s], axis=1).max(axis=1)
         below_120_cnt = int((c.tail(40) < ma120_s.tail(40)).sum())
         clear_r_20 = bool((c.tail(20) <= r_s.tail(20)).all())
         ma_base_ok = (below_120_cnt >= 32) and clear_r_20
 
+        # 일목균형표: 현재 봉 포함 26번째 앞(25봉 전) 선행스팬과 일치
         tenkan_s = (h.rolling(9).max() + l.rolling(9).min()) / 2.0
         kijun_s = (h.rolling(26).max() + l.rolling(26).min()) / 2.0
         span_a = (tenkan_s + kijun_s) / 2.0
         span_b = (h.rolling(52).max() + l.rolling(52).min()) / 2.0
         raw_top = pd.concat([span_a, span_b], axis=1).max(axis=1)
-        cloud_top_s = raw_top.shift(26)
+        cloud_top_s = raw_top.shift(25)
 
-        ichimoku_top_today = float(raw_top.iloc[-26]) if len(raw_top) >= 26 and pd.notna(raw_top.iloc[-26]) else 0.0
+        ichimoku_top_today = float(raw_top.iloc[-25]) if len(raw_top) >= 25 and pd.notna(raw_top.iloc[-25]) else 0.0
         ichimoku_clear_20 = bool((c.tail(20) <= cloud_top_s.tail(20)).all()) if cloud_top_s.tail(20).notna().all() else False
 
         hh8 = float(h.tail(8).max())
@@ -1016,7 +1101,7 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
             "ma60_10": ma60_10,
             "ma120_20": ma120_20,
             "c_5_ago": c_5_ago,
-            "c_26_ago": c_26_ago,
+            "c_25_ago": c_25_ago,
             "ma_base_ok": ma_base_ok,
             "ichimoku_top": ichimoku_top_today,
             "ichimoku_clear_20": ichimoku_clear_20,
@@ -1046,14 +1131,20 @@ def ensure_daily_levels(state, df):
     kq_map = idx_base.get("KQ11", {}).get("closes_map", {})
     hist_lows_cache = state.setdefault("hist_lows", {})
     hist_low_dates = state.setdefault("hist_low_dates", {})
+    short_hist_set = set(state.setdefault("short_hist", []))
+    retries = state.setdefault("level_retries", {})
     today_str = state["date"]
+    t_dates = state.get("trading_dates", [])
+    prev_trading_day = t_dates[-2] if len(t_dates) >= 2 else ""
 
     missing = []
     for _, row in df.iterrows():
-        code = str(row["Code"]).zfill(6)
+        code = _norm_code(row["Code"])
+        if code in short_hist_set or retries.get(code, 0) >= 2:
+            continue
         if code not in state["levels"]:
             c_low = hist_lows_cache.get(code)
-            need_full = _need_full_hist_refresh(today_str, hist_low_dates.get(code), c_low)
+            need_full = _need_full_hist_refresh(code, today_str, hist_low_dates.get(code), c_low)
             missing.append((code, row["MarketType"], c_low, need_full))
 
     if not missing:
@@ -1062,8 +1153,7 @@ def ensure_daily_levels(state, df):
     full_cnt = sum(1 for _, _, _, nf in missing if nf)
     workers = 4 if full_cnt >= 30 else 8
     print(f"금일 기준선 계산 중 ({len(missing)}종목, 전체재조회 {full_cnt}종목, workers={workers})...")
-    use_krx_prefix = _verify_krx_adjusted()
-    krx_cnt, fb_cnt, fail_cnt = 0, 0, 0
+    ok_cnt, stale_cnt, fail_cnt = 0, 0, 0
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
@@ -1074,50 +1164,75 @@ def ensure_daily_levels(state, df):
                 ks_map if m_type == "KOSPI" else kq_map,
                 c_low,
                 need_full,
-                use_krx_prefix,
+                prev_trading_day,
             ): need_full
             for code, m_type, c_low, need_full in missing
         }
         for fut in as_completed(futures):
             was_full = futures[fut]
             code, h_low, info, src = fut.result()
-            if src == "KRX":
-                krx_cnt += 1
-            elif src == "FALLBACK":
-                fb_cnt += 1
-            else:
-                fail_cnt += 1
+            if src == "SHORT_HIST":
+                short_hist_set.add(code)
+                continue
+            if src in ("STALE", "FAIL") or not info:
+                retries[code] = retries.get(code, 0) + 1
+                if src == "STALE":
+                    stale_cnt += 1
+                else:
+                    fail_cnt += 1
+                continue
 
+            ok_cnt += 1
             if h_low and h_low > 0:
                 hist_lows_cache[code] = h_low
                 if was_full or code not in hist_low_dates:
                     hist_low_dates[code] = today_str
-            if info:
-                state["levels"][code] = info
+            state["levels"][code] = info
 
+    state["short_hist"] = sorted(short_hist_set)
     prev_hl = state.get("health") or {}
     top200_cnt = int(df["InTop200"].sum()) if "InTop200" in df.columns else len(df)
     state["health"] = {
         "target_cnt": top200_cnt,
         "levels_ok": len(state["levels"]),
-        "krx_cnt": prev_hl.get("krx_cnt", 0) + krx_cnt,
-        "fb_cnt": prev_hl.get("fb_cnt", 0) + fb_cnt,
+        "short_hist_cnt": len(short_hist_set),
+        "stale_cnt": prev_hl.get("stale_cnt", 0) + stale_cnt,
         "fail_cnt": prev_hl.get("fail_cnt", 0) + fail_cnt,
     }
 
 
-def get_market_elapsed_ratio():
+def get_market_elapsed_ratio(sched):
+    """KRX 장중 U자 누적 거래량 비율 곡선 적용 (오전 RVOL 과대평가 보정)"""
     now = datetime.now(KST)
     hhmm = now.hour * 100 + now.minute
-    if hhmm < 905 or hhmm >= 1530:
+    if hhmm < sched["start_check"] or hhmm >= sched["close_hhmm"]:
         return 1.0
-    market_open = now.replace(hour=9, minute=0, second=0, microsecond=0)
-    elapsed_min = (now - market_open).total_seconds() / 60.0
-    effective_min = min(390.0, max(5.0, elapsed_min))
-    return effective_min / 390.0
+
+    market_open = now.replace(hour=sched["open_h"], minute=sched["open_m"], second=0, microsecond=0)
+    elapsed_min = max(5.0, (now - market_open).total_seconds() / 60.0)
+    progress = min(1.0, elapsed_min / sched["total_min"])
+
+    # 정규장 390분 기준 KRX 경험적 누적 거래량 비율 곡선
+    curve = [
+        (0.000, 0.055),
+        (0.038, 0.145),  # +15분
+        (0.077, 0.230),  # +30분
+        (0.154, 0.350),  # +60분
+        (0.308, 0.500),  # +120분
+        (0.538, 0.680),  # +210분
+        (0.769, 0.840),  # +300분
+        (0.923, 0.930),  # +360분
+        (1.000, 1.000),  # 마감
+    ]
+    for i in range(1, len(curve)):
+        x0, y0 = curve[i - 1]
+        x1, y1 = curve[i]
+        if progress <= x1:
+            return y0 + (y1 - y0) * ((progress - x0) / (x1 - x0))
+    return 1.0
 
 
-def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_chg, kq_chg, hhmm):
+def evaluate_follow_up_setups(webhook_url, state, live_snapshots, idx_valid, ks_chg, kq_chg, hhmm, sched):
     setups = state.get("active_setups", {})
     if not setups:
         return 0
@@ -1125,6 +1240,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
     today = state["date"]
     sent = 0
     to_remove = []
+    near_close_hhmm = sched["close_hhmm"] - 15
 
     for key, st in list(setups.items()):
         created = st["created_date"]
@@ -1136,7 +1252,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
             to_remove.append(key)
             continue
 
-        code = str(st["code"]).zfill(6)
+        code = _norm_code(st["code"])
         snap = live_snapshots.get(code)
         lv = state["levels"].get(code)
         if not snap or not lv:
@@ -1151,11 +1267,11 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
         market_type = st["market"]
 
         invalid_reason = None
-        if sig_id == "NEW_4" and hhmm >= 1515 and c < ma20 * 0.97:
+        if sig_id == "NEW_4" and hhmm >= near_close_hhmm and c < ma20 * 0.97:
             invalid_reason = f"종가 무렵 현재가({int(c):,}원)가 20일선 3% 손절선({int(ma20*0.97):,}원)을 이탈했습니다."
         elif sig_id == "NEW_6" and l < st["setup_low"]:
             invalid_reason = f"당일 저가({int(l):,}원)가 급락일 저가({int(st['setup_low']):,}원)를 하향 이탈했습니다."
-        elif sig_id == "NEW_7" and hhmm >= 1515 and c < ma20:
+        elif sig_id == "NEW_7" and hhmm >= near_close_hhmm and c < ma20:
             invalid_reason = f"종가 무렵 현재가({int(c):,}원)가 20일 이동평균선({int(ma20):,}원)을 이탈했습니다."
 
         if invalid_reason:
@@ -1183,7 +1299,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
             elif h > lv["prev_high"] and c > ma20:
                 trigger_reason = f"20일선({int(ma20):,}원) 지지 속 직전 거래일 고가({int(lv['prev_high']):,}원) 돌파 확인"
         elif sig_id == "NEW_6":
-            idx_chg = (ks_chg if market_type == "KOSPI" else kq_chg) if etf_valid else None
+            idx_chg = (ks_chg if market_type == "KOSPI" else kq_chg) if idx_valid else None
             if idx_chg is not None and idx_chg >= 0.3 and h > st["setup_high"] and c > o:
                 trigger_reason = f"시장 지수 반등({idx_chg:+.2f}%)과 함께 급락일 고가({int(st['setup_high']):,}원) 돌파"
         elif sig_id == "NEW_7":
@@ -1207,11 +1323,71 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_
                 mention=True,
             )
             if ok:
+                # 실제 진입 트리거 시점을 별도 행(NEW_4T/6T/7T)으로 CSV에 기록
+                append_signal_csv(
+                    date_str=today,
+                    code=code,
+                    name=name,
+                    market=market_type,
+                    sig_id=f"{sig_id}T",
+                    sig_label=f"{sig_label}(진입)",
+                    entry_price=c,
+                    stop_price=st["stop_price"],
+                    target_price=st["target_price"],
+                )
                 to_remove.append(key)
                 sent += 1
 
     for k in to_remove:
         setups.pop(k, None)
+    return sent
+
+
+def flush_basic_alerts(webhook_url, state, basic_alerts):
+    if not basic_alerts:
+        return 0
+
+    sent = 0
+    limit = CONFIG["MAX_INDIVIDUAL_BASIC_ALERTS"]
+    direct_list = basic_alerts[:limit]
+    overflow_list = basic_alerts[limit:]
+
+    for item in direct_list:
+        ok = send_individual_card(
+            webhook_url,
+            item["market"],
+            title=item["title"],
+            meaning=item["meaning"],
+            action_guide=item["guide"],
+            color=item["color"],
+            fields=item["fields"],
+            mention=False,
+        )
+        if ok:
+            for ev_key in item["commit_keys"]:
+                commit_once(state, item["code"], ev_key)
+            sent += 1
+
+    if overflow_list:
+        summary_lines = [f"• **{it['title']}** — `{it['summary']}`" for it in overflow_list[:20]]
+        if len(overflow_list) > 20:
+            summary_lines.append(f"• 외 {len(overflow_list) - 20}건 동시 포착")
+        ok = send_discord_embed(
+            webhook_url,
+            title=f"📦 [장중 기본 경보 요약 {len(overflow_list)}건]",
+            description=(
+                "📖 **알림 의미:** 단시간 내 다수 종목에서 급락·거래폭발·지지선 경보가 동시에 발생하여 알림 폭주를 막기 위해 요약 묶음으로 발송합니다.\n\n"
+                + "\n".join(summary_lines)
+            ),
+            color=15105570,
+            mention=False,
+        )
+        if ok:
+            for it in overflow_list:
+                for ev_key in it["commit_keys"]:
+                    commit_once(state, it["code"], ev_key)
+            sent += 1
+
     return sent
 
 
@@ -1223,37 +1399,35 @@ def main():
     state = load_state()
     now = datetime.now(KST)
     hhmm = now.hour * 100 + now.minute
+    sched = get_session_schedule(state["date"])
 
-    if not check_trading_day_and_index_history(state, hhmm):
+    is_open_day, live_indices = check_trading_day_and_index_history(state, hhmm, sched)
+    if not is_open_day:
         return
 
-    is_intraday = (hhmm < 1535)
-    is_after_10am = (hhmm >= 1000)
+    is_intraday = (hhmm < sched["closing_check"])
+    is_after_1h = (hhmm >= sched["after_1h"])
     sent_count = 0
+    basic_alerts = []
     batch_6_candidates = []
     batch_7_candidates = []
     live_snapshots = {}
 
     try:
-        df, etf_now, raw_etf_ok = fetch_top_universe_and_etf(state)
+        df, idx_valid, idx_live_map, idx_chg_map = fetch_top_universe_and_etf(state, live_indices)
         ensure_daily_levels(state, df)
 
-        idx_hist_ok = state.get("index_base", {}).get("valid", False)
-        etf_valid = idx_hist_ok and ("069500" in etf_now) and ("229200" in etf_now)
-        ks_chg = etf_now.get("069500")
-        kq_chg = etf_now.get("229200")
+        ks_chg = idx_chg_map.get("KS11")
+        kq_chg = idx_chg_map.get("KQ11")
+        ks_live = idx_live_map.get("KS11", 0.0)
+        kq_live = idx_live_map.get("KQ11", 0.0)
 
-        idx_base = state.get("index_base", {})
-        ks_prev = idx_base.get("KS11", {}).get("prev_close", 0.0)
-        kq_prev = idx_base.get("KQ11", {}).get("prev_close", 0.0)
-        ks_live = ks_prev * (1.0 + ks_chg / 100.0) if (etf_valid and ks_prev > 0) else 0.0
-        kq_live = kq_prev * (1.0 + kq_chg / 100.0) if (etf_valid and kq_prev > 0) else 0.0
-
-        elapsed_ratio = get_market_elapsed_ratio()
+        elapsed_ratio = get_market_elapsed_ratio(sched)
         buffer_mult = 1.0 + (CONFIG["LOW_TOUCH_BUFFER_PCT"] / 100.0)
+        total_universe_vol = 0.0
 
         for _, row in df.iterrows():
-            code = str(row["Code"]).zfill(6)
+            code = _norm_code(row["Code"])
             name = str(row["Name"])
             market_type = row["MarketType"]
             in_top200 = bool(row["InTop200"]) if "InTop200" in row else True
@@ -1266,12 +1440,20 @@ def main():
             if not lv:
                 continue
 
+            # 수정주가(권리락·액면분할) 감지: 애프터마켓(±10%) 오탐 방지를 위해 18% 이상 괴리만 리셋
             naver_prev = float(row["NaverPrevClose"]) if ("NaverPrevClose" in row and pd.notna(row["NaverPrevClose"])) else 0.0
-            if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.05:
+            if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.18:
                 state.get("hist_lows", {}).pop(code, None)
                 state.get("hist_low_dates", {}).pop(code, None)
                 state.get("levels", {}).pop(code, None)
                 continue
+
+            # 공식 전일 종가(ListingClose)가 유효하면 등락률 기준가로 우선 사용 (애프터마켓 종가 왜곡 차단)
+            listing_close = float(row["ListingClose"]) if ("ListingClose" in row and pd.notna(row["ListingClose"])) else 0.0
+            if listing_close > 0 and lv["prev_close"] > 0 and abs(listing_close - lv["prev_close"]) / lv["prev_close"] <= 0.18:
+                ref_prev_close = listing_close
+            else:
+                ref_prev_close = lv["prev_close"]
 
             o = float(row["Open"]) if ("Open" in row and pd.notna(row["Open"]) and row["Open"] > 0) else c
             h_raw = float(row["High"]) if ("High" in row and pd.notna(row["High"]) and row["High"] > 0) else c
@@ -1279,12 +1461,13 @@ def main():
             h = max(h_raw, c, o)
             l = min(l_raw, c, o)
 
-            if lv["prev_close"] > 0:
-                chg = ((c - lv["prev_close"]) / lv["prev_close"]) * 100.0
+            if ref_prev_close > 0:
+                chg = ((c - ref_prev_close) / ref_prev_close) * 100.0
             else:
                 chg = float(row["ChagesRatio"]) if ("ChagesRatio" in row and pd.notna(row["ChagesRatio"])) else 0.0
 
             v = float(row["Volume"]) if ("Volume" in row and pd.notna(row["Volume"])) else 0.0
+            total_universe_vol += v
             raw_amt = float(row["Amount"]) if ("Amount" in row and pd.notna(row["Amount"])) else 0.0
             amt = raw_amt if raw_amt > 0 else ((h + l + c) / 3.0) * v
             amount_uk = int(amt / 100_000_000)
@@ -1302,22 +1485,22 @@ def main():
             hh20 = max(lv["hh19"], h)
             chg_5d = ((c / lv["c_5_ago"]) - 1.0) * 100.0 if lv["c_5_ago"] > 0 else 0.0
 
-            idx_chg = (ks_chg if market_type == "KOSPI" else kq_chg) if etf_valid else None
-            idx_live = (ks_live if market_type == "KOSPI" else kq_live) if etf_valid else 0.0
+            idx_chg = (ks_chg if market_type == "KOSPI" else kq_chg) if idx_valid else None
+            idx_live = (ks_live if market_type == "KOSPI" else kq_live) if idx_valid else 0.0
             rs_today = (c / idx_live) if idx_live > 0 else 0.0
 
             live_snapshots[code] = {
                 "o": o, "h": h, "l": l, "c": c, "v": v, "amt": amt,
                 "chg": chg, "chg_5d": chg_5d, "clv": clv, "rvol": rvol,
                 "ma5": ma5, "ma20": ma20, "ma60": ma60, "ma120": ma120,
-                "hh20": hh20, "rs_today": rs_today,
+                "hh20": hh20, "rs_today": rs_today, "ref_prev_close": ref_prev_close,
             }
 
             if not in_top200 or not is_intraday:
                 continue
 
             # ==============================================================
-            # [A] 기존 4종 기본 알림 (멘션 없음)
+            # [A] 기본 4종 알림 수집 (폭락일 다이제스트 묶음 지원)
             # ==============================================================
             hist_low = lv["hist_low"]
             prev_low = lv["prev_low"]
@@ -1325,25 +1508,23 @@ def main():
             if hist_low > 0 and l <= hist_low * buffer_mult:
                 if can_fire_once(state, code, "HIST_LOW"):
                     status = "역사적 신저가 이탈!" if l < hist_low else "역사적 저점 근접!"
-                    ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=f"🌋 [역사적 저점] {name} ({code}) · {status}",
-                        meaning="상장 이후 장기 최저가(최대 12년 기준) 영역에 도달했습니다. 장기 하락 추세의 마지막 바닥 지지 여부를 시험하는 구간입니다.",
-                        action_guide=(
+                    basic_alerts.append({
+                        "code": code, "market": market_type, "commit_keys": ["HIST_LOW"],
+                        "title": f"🌋 [역사적 저점] {name} ({code}) · {status}",
+                        "summary": f"{int(c):,}원 ({chg:+.2f}%) · 저점 {int(hist_low):,}원",
+                        "meaning": "상장 이후 장기 최저가(최대 12년 기준) 영역에 도달했습니다. 장기 하락 추세의 마지막 바닥 지지 여부를 시험하는 구간입니다.",
+                        "guide": (
                             "1) 유상증자·실적 쇼크 등 기업 펀더멘털 훼손 공시 여부 먼저 확인\n"
                             "2) 떨어지는 칼날 즉시 매수 금지 — 거래량 동반 양봉 전환 확인 전까지 관망\n"
                             f"3) 종가 기준 장기 최저가(**{int(hist_low):,}원**) 이탈 시 추가 하방 열림 주의"
                         ),
-                        color=9323693,
-                        fields=[
+                        "color": 9323693,
+                        "fields": [
                             {"name": "현재가 (장중저가)", "value": f"{int(c):,}원 ({int(l):,}원)", "inline": True},
                             {"name": "장기 역사적 저점", "value": f"**{int(hist_low):,}원**", "inline": True},
                             {"name": "등락률 / 거래대금", "value": f"{chg:+.2f}% / {amount_uk:,}억", "inline": True},
                         ],
-                    )
-                    if ok:
-                        commit_once(state, code, "HIST_LOW")
-                        sent_count += 1
+                    })
 
             elif (
                 prev_low > 0
@@ -1353,31 +1534,29 @@ def main():
             ):
                 if can_fire_once(state, code, "PREV_LOW"):
                     status = "지지선 하향 이탈" if l < prev_low else "지지선 터치 근접"
-                    ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=f"⚓ [10일 전저점] {name} ({code}) · {status}",
-                        meaning="최근 10거래일 기준 의미 있는 스윙 바닥(직전 지지선)에 닿았습니다. 기술적 반등과 추세 이탈이 갈리는 자리입니다.",
-                        action_guide=(
+                    basic_alerts.append({
+                        "code": code, "market": market_type, "commit_keys": ["PREV_LOW"],
+                        "title": f"⚓ [스윙 전저점(10봉)] {name} ({code}) · {status}",
+                        "summary": f"{int(c):,}원 ({chg:+.2f}%) · 지지선 {int(prev_low):,}원",
+                        "meaning": "최근 150거래일 내 좌우 10봉 기준 의미 있는 스윙 바닥(직전 지지선)에 닿았습니다. 기술적 반등과 추세 이탈이 갈리는 자리입니다.",
+                        "guide": (
                             f"1) 지지선(**{int(prev_low):,}원**) 부근에서 하락이 멈추고 아래꼬리·양봉이 나오는지 관찰\n"
                             "2) 반등 확인 시 단기 반등 노림 가능 (종가 기준 전저점 이탈 시 즉시 손절)\n"
                             "3) 거래량을 동반한 장대음봉으로 깰 경우 투매 확산 주의"
                         ),
-                        color=15965202,
-                        fields=[
+                        "color": 15965202,
+                        "fields": [
                             {"name": "현재가 (장중저가)", "value": f"{int(c):,}원 ({int(l):,}원)", "inline": True},
                             {"name": "직전 전저점", "value": f"**{int(prev_low):,}원**", "inline": True},
                             {"name": "등락률 / 거래대금", "value": f"{chg:+.2f}% / {amount_uk:,}억", "inline": True},
                         ],
-                    )
-                    if ok:
-                        commit_once(state, code, "PREV_LOW")
-                        sent_count += 1
+                    })
 
             if avg_vol_20 > 0 and amount_uk >= CONFIG["MIN_TRADE_AMOUNT_UK"] and rvol >= CONFIG["VOL_SURGE_PCT"]:
                 if can_fire_once(state, code, "VOL_SURGE"):
                     if chg >= 0:
                         title = f"🚀 [매수 수급폭발] {name} ({code})"
-                        meaning = f"평상시 동시간대 대비 **{rvol:,.0f}%**의 강한 매수 수급이 유입되며 주가를 끌어올리는 신호입니다."
+                        meaning = f"장중 거래량 곡선 대비 **{rvol:,.0f}%**의 강한 매수 수급이 유입되며 주가를 끌어올리는 신호입니다."
                         guide = (
                             "1) 뉴스·공시·테마 등 수급이 쏠린 핵심 재료 확인\n"
                             "2) 급등 추격 매수보다 당일 양봉 중심값 지지 여부 확인 후 눌림목 대기\n"
@@ -1386,28 +1565,26 @@ def main():
                         color = 3066993
                     else:
                         title = f"🌊 [투매 거래폭발] {name} ({code})"
-                        meaning = f"평상시 동시간대 대비 **{rvol:,.0f}%**의 대량 매도 물량이 쏟아지며 투매가 발생하는 경보입니다."
+                        meaning = f"장중 거래량 곡선 대비 **{rvol:,.0f}%**의 대량 매도 물량이 쏟아지며 투매가 발생하는 경보입니다."
                         guide = (
                             "1) 악재 공시(유증·실적 부진·외국인/기관 대량 이탈) 즉시 체크\n"
                             "2) 투매 진행 중 섣부른 물타기 금지 — 거래량 감소 및 바닥 다지기 확인\n"
                             "3) 보유 종목이라면 본인의 손절 기준선 이탈 여부 점검"
                         )
                         color = 3447003
-                    ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=title,
-                        meaning=meaning,
-                        action_guide=guide,
-                        color=color,
-                        fields=[
+                    basic_alerts.append({
+                        "code": code, "market": market_type, "commit_keys": ["VOL_SURGE"],
+                        "title": title,
+                        "summary": f"{int(c):,}원 ({chg:+.2f}%) · RVOL {rvol:,.0f}% ({amount_uk:,}억)",
+                        "meaning": meaning,
+                        "guide": guide,
+                        "color": color,
+                        "fields": [
                             {"name": "현재가 (등락률)", "value": f"{int(c):,}원 (**{chg:+.2f}%**)", "inline": True},
                             {"name": "거래량 폭발률", "value": f"**{rvol:,.0f}%**", "inline": True},
                             {"name": "누적 거래대금", "value": f"{amount_uk:,}억 원", "inline": True},
                         ],
-                    )
-                    if ok:
-                        commit_once(state, code, "VOL_SURGE")
-                        sent_count += 1
+                    })
 
             passed_drops = [t for t in sorted(CONFIG["THRESHOLDS"]) if chg <= t]
             if passed_drops:
@@ -1420,26 +1597,24 @@ def main():
                     else:
                         title, color = f"📉 [-5% 급락 알림] {name} ({code})", 15105570
                     idx_txt = f"{idx_chg:+.2f}%" if idx_chg is not None else "조회대기"
-                    ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=title,
-                        meaning=f"전일 종가 대비 **{deepest:.0f}%** 이상 급락하며 단기 과매도 구간에 진입했습니다.",
-                        action_guide=(
+                    basic_alerts.append({
+                        "code": code, "market": market_type,
+                        "commit_keys": [f"DROP_{t}" for t in passed_drops],
+                        "title": title,
+                        "summary": f"{int(c):,}원 ({chg:.2f}%) · 거래대금 {amount_uk:,}억",
+                        "meaning": f"공식 전일 종가 대비 **{deepest:.0f}%** 이상 급락하며 단기 과매도 구간에 진입했습니다.",
+                        "guide": (
                             f"1) 소속 지수({idx_txt}) 동반 급락인지, 개별 기업 악재인지 먼저 구분\n"
                             "2) 과매도 반등을 노릴 경우 장 막판 투매 진정 확인 후 소액 분할만 고려\n"
                             "3) 반등 없이 당일 저가 부근으로 마감 시 익일 추가 갭하락 가능성 대비"
                         ),
-                        color=color,
-                        fields=[
+                        "color": color,
+                        "fields": [
                             {"name": "현재가", "value": f"{int(c):,}원", "inline": True},
                             {"name": "등락률", "value": f"**{chg:.2f}%**", "inline": True},
                             {"name": "거래대금", "value": f"{amount_uk:,}억 원", "inline": True},
                         ],
-                    )
-                    if ok:
-                        for t in passed_drops:
-                            commit_once(state, code, f"DROP_{t}")
-                        sent_count += 1
+                    })
 
             # ==============================================================
             # [B] 신규 8종 퀀트 시그널 (mention=True로 @everyone 푸시 발송)
@@ -1449,9 +1624,9 @@ def main():
 
             # --- [신규 1] 전저점 스윕 리클레임 ---
             pl = lv["sweep_pl"]
-            if is_after_10am and pl > 0:
-                target_1 = ma20 if ma20 > c else hh20
-                rr_1 = ((target_1 - c) / (c - l)) if c > l else 0.0
+            if is_after_1h and pl > 0:
+                target_1 = ma20 if ma20 > c * 1.03 else max(hh20, lv["hh60"])
+                rr_1 = ((target_1 - c) / (c - l)) if (c > l and target_1 > c) else 0.0
                 if (
                     pl * 0.97 <= l < pl
                     and c >= pl * 1.005
@@ -1490,7 +1665,7 @@ def main():
             # --- [신규 2 & 3] 60·120일선 첫 돌파 & 일목 구름대 상단 첫 돌파 ---
             r_line = max(ma60, ma120)
             cond_2 = (
-                is_after_10am
+                is_after_1h
                 and lv["ma_base_ok"]
                 and c > r_line * 1.01
                 and chg >= 3.0
@@ -1505,113 +1680,108 @@ def main():
             t_today = (max(lv["hh8"], h) + min(lv["ll8"], l)) / 2.0
             k_today = (max(lv["hh25"], h) + min(lv["ll25"], l)) / 2.0
             cond_3 = (
-                is_after_10am
+                is_after_1h
                 and top_cloud > 0
                 and lv["ichimoku_clear_20"]
                 and c > top_cloud * 1.01
                 and t_today >= k_today
-                and c > lv["c_26_ago"]
+                and c > lv["c_25_ago"]
                 and chg >= 2.5
                 and clv >= 0.6
                 and rvol >= 180.0
                 and amt >= 10_000_000_000
             )
 
-            raw_target_23 = lv["hh120"] if lv["hh120"] > c * 1.05 else max(lv["hh240"], c * 1.15)
-            target_23 = max(raw_target_23, c * 1.12)
+            target_23 = lv["hh120"] if lv["hh120"] > c * 1.05 else max(lv["hh240"], c * 1.15)
 
-            if cond_2 and cond_3:
-                ok2 = can_fire_cooldown(state, code, "NEW_2_MABREAK")
-                ok3 = can_fire_cooldown(state, code, "NEW_3_CLOUD")
-                if ok2 or ok3:
-                    stop_23 = min(r_line, top_cloud) * 0.99
-                    sent_ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=f"⚔️ [이중 돌파: 이평선+구름대] {name} ({code})",
-                        meaning="장기 저항선(60·120일선)과 일목균형표 구름대 상단을 거래량을 동반해 동시에 돌파한 강력한 추세 전환 시그널입니다.",
-                        action_guide=(
-                            "• **진입:** 14:50 이후에도 돌파선 위 유지 시 **1/3 진입**, 나머지는 1~3일 내 돌파선 리테스트 때 분할\n"
-                            f"• **손절:** 종가 기준 돌파선(**{int(stop_23):,}원**) 재이탈 또는 돌파일 저가 이탈 시 손절\n"
-                            f"• **목표:** 1차 목표(**{int(target_23):,}원**) 절반 익절 후 나머지는 20일선 이탈까지 보유"
-                        ),
-                        color=15844367,
-                        fields=[
-                            {"name": "현재가 (등락률)", "value": f"**{int(c):,}원** (`{chg:+.2f}%`)", "inline": True},
-                            {"name": "돌파 기준 (이평/구름)", "value": f"{int(r_line):,} / {int(top_cloud):,}원", "inline": True},
-                            {"name": "손절 / 1차목표", "value": f"{int(stop_23):,} / {int(target_23):,}원", "inline": True},
-                        ],
-                        mention=True,
+            ok2 = cond_2 and can_fire_cooldown(state, code, "NEW_2_MABREAK")
+            ok3 = cond_3 and can_fire_cooldown(state, code, "NEW_3_CLOUD")
+
+            if ok2 and ok3:
+                stop_23 = min(r_line, top_cloud) * 0.99
+                sent_ok = send_individual_card(
+                    webhook_url, market_type,
+                    title=f"⚔️ [이중 돌파: 이평선+구름대] {name} ({code})",
+                    meaning="장기 저항선(60·120일선)과 일목균형표 구름대 상단을 거래량을 동반해 동시에 돌파한 강력한 추세 전환 시그널입니다.",
+                    action_guide=(
+                        "• **진입:** 장 마감 40분 전에도 돌파선 위 유지 시 **1/3 진입**, 나머지는 1~3일 내 돌파선 리테스트 때 분할\n"
+                        f"• **손절:** 종가 기준 돌파선(**{int(stop_23):,}원**) 재이탈 또는 돌파일 저가 이탈 시 손절\n"
+                        f"• **목표:** 1차 목표(**{int(target_23):,}원**) 절반 익절 후 나머지는 20일선 이탈까지 보유"
+                    ),
+                    color=15844367,
+                    fields=[
+                        {"name": "현재가 (등락률)", "value": f"**{int(c):,}원** (`{chg:+.2f}%`)", "inline": True},
+                        {"name": "돌파 기준 (이평/구름)", "value": f"{int(r_line):,} / {int(top_cloud):,}원", "inline": True},
+                        {"name": "손절 / 1차목표", "value": f"{int(stop_23):,} / {int(target_23):,}원", "inline": True},
+                    ],
+                    mention=True,
+                )
+                if sent_ok:
+                    commit_cooldown(state, code, "NEW_2_MABREAK")
+                    record_today_signal(
+                        state, code, name, market_type, "NEW_2", "2.이평돌파",
+                        entry_price=c, stop_price=r_line * 0.99, target_price=target_23,
+                        buy_zone=f"{int(r_line):,}~{int(c):,}원"
                     )
-                    if sent_ok:
-                        if ok2:
-                            commit_cooldown(state, code, "NEW_2_MABREAK")
-                            record_today_signal(
-                                state, code, name, market_type, "NEW_2", "2.이평돌파",
-                                entry_price=c, stop_price=r_line * 0.99, target_price=target_23,
-                                buy_zone=f"{int(r_line):,}~{int(c):,}원"
-                            )
-                        if ok3:
-                            commit_cooldown(state, code, "NEW_3_CLOUD")
-                            record_today_signal(
-                                state, code, name, market_type, "NEW_3", "3.구름돌파",
-                                entry_price=c, stop_price=top_cloud * 0.99, target_price=target_23,
-                                buy_zone=f"{int(top_cloud):,}~{int(c):,}원"
-                            )
-                        sent_count += 1
-            elif cond_2:
-                if can_fire_cooldown(state, code, "NEW_2_MABREAK"):
-                    sent_ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=f"📈 [60·120일선 첫 돌파] {name} ({code})",
-                        meaning=f"오랜 기간 저항으로 작용하던 60·120일선(**{int(r_line):,}원**)을 거래량을 실어 처음 뚫어낸 추세 전환 초입 시그널입니다.",
-                        action_guide=(
-                            f"• **진입:** 14:50 이후에도 **{int(r_line):,}원** 위 유지 시 **1/3 진입**, 나머지는 1~3일 내 리테스트 때 분할\n"
-                            f"• **손절:** 종가 기준 돌파선(**{int(r_line*0.99):,}원**) 재이탈 또는 돌파일 저가 이탈 시 손절\n"
-                            f"• **목표:** 1차 목표(**{int(target_23):,}원**) 절반 익절 후 20일선 이탈까지 추세 추종"
-                        ),
-                        color=3066993,
-                        fields=[
-                            {"name": "현재가 (등락률)", "value": f"**{int(c):,}원** (`{chg:+.2f}%`)", "inline": True},
-                            {"name": "RVOL / 거래대금", "value": f"{rvol:,.0f}% / {amount_uk:,}억", "inline": True},
-                            {"name": "손절 / 1차목표", "value": f"{int(r_line*0.99):,} / {int(target_23):,}원", "inline": True},
-                        ],
-                        mention=True,
+                    commit_cooldown(state, code, "NEW_3_CLOUD")
+                    record_today_signal(
+                        state, code, name, market_type, "NEW_3", "3.구름돌파",
+                        entry_price=c, stop_price=top_cloud * 0.99, target_price=target_23,
+                        buy_zone=f"{int(top_cloud):,}~{int(c):,}원"
                     )
-                    if sent_ok:
-                        commit_cooldown(state, code, "NEW_2_MABREAK")
-                        record_today_signal(
-                            state, code, name, market_type, "NEW_2", "2.이평돌파",
-                            entry_price=c, stop_price=r_line * 0.99, target_price=target_23,
-                            buy_zone=f"{int(r_line):,}~{int(c):,}원"
-                        )
-                        sent_count += 1
-            elif cond_3:
-                if can_fire_cooldown(state, code, "NEW_3_CLOUD"):
-                    sent_ok = send_individual_card(
-                        webhook_url, market_type,
-                        title=f"⛅ [일목 구름대 첫 돌파] {name} ({code})",
-                        meaning=f"일목균형표 구름대 상단(**{int(top_cloud):,}원**)을 첫 돌파하고 전환선≥기준선·후행스팬 주가 위 조건까지 충족한 상승 진입 신호입니다.",
-                        action_guide=(
-                            f"• **진입:** 종가가 구름대 상단(**{int(top_cloud):,}원**) 위로 확정될 때 종가 매수 또는 익일 리테스트 진입\n"
-                            f"• **손절:** 종가 기준 구름대 안으로 재진입(**{int(top_cloud*0.99):,}원** 하회) 시 손절\n"
-                            f"• **목표 / 청산:** 1차 목표(**{int(target_23):,}원**) / 일목 기준선(**{int(k_today):,}원**) 이탈까지 보유"
-                        ),
-                        color=1752220,
-                        fields=[
-                            {"name": "현재가 (등락률)", "value": f"**{int(c):,}원** (`{chg:+.2f}%`)", "inline": True},
-                            {"name": "RVOL / 거래대금", "value": f"{rvol:,.0f}% / {amount_uk:,}억", "inline": True},
-                            {"name": "손절 / 1차목표", "value": f"{int(top_cloud*0.99):,} / {int(target_23):,}원", "inline": True},
-                        ],
-                        mention=True,
+                    sent_count += 1
+            elif ok2:
+                sent_ok = send_individual_card(
+                    webhook_url, market_type,
+                    title=f"📈 [60·120일선 첫 돌파] {name} ({code})",
+                    meaning=f"오랜 기간 저항으로 작용하던 60·120일선(**{int(r_line):,}원**)을 거래량을 실어 처음 뚫어낸 추세 전환 초입 시그널입니다.",
+                    action_guide=(
+                        f"• **진입:** 장 마감 40분 전에도 **{int(r_line):,}원** 위 유지 시 **1/3 진입**, 나머지는 1~3일 내 리테스트 때 분할\n"
+                        f"• **손절:** 종가 기준 돌파선(**{int(r_line*0.99):,}원**) 재이탈 또는 돌파일 저가 이탈 시 손절\n"
+                        f"• **목표:** 1차 목표(**{int(target_23):,}원**) 절반 익절 후 20일선 이탈까지 추세 추종"
+                    ),
+                    color=3066993,
+                    fields=[
+                        {"name": "현재가 (등락률)", "value": f"**{int(c):,}원** (`{chg:+.2f}%`)", "inline": True},
+                        {"name": "RVOL / 거래대금", "value": f"{rvol:,.0f}% / {amount_uk:,}억", "inline": True},
+                        {"name": "손절 / 1차목표", "value": f"{int(r_line*0.99):,} / {int(target_23):,}원", "inline": True},
+                    ],
+                    mention=True,
+                )
+                if sent_ok:
+                    commit_cooldown(state, code, "NEW_2_MABREAK")
+                    record_today_signal(
+                        state, code, name, market_type, "NEW_2", "2.이평돌파",
+                        entry_price=c, stop_price=r_line * 0.99, target_price=target_23,
+                        buy_zone=f"{int(r_line):,}~{int(c):,}원"
                     )
-                    if sent_ok:
-                        commit_cooldown(state, code, "NEW_3_CLOUD")
-                        record_today_signal(
-                            state, code, name, market_type, "NEW_3", "3.구름돌파",
-                            entry_price=c, stop_price=top_cloud * 0.99, target_price=target_23,
-                            buy_zone=f"{int(top_cloud):,}~{int(c):,}원"
-                        )
-                        sent_count += 1
+                    sent_count += 1
+            elif ok3:
+                sent_ok = send_individual_card(
+                    webhook_url, market_type,
+                    title=f"⛅ [일목 구름대 첫 돌파] {name} ({code})",
+                    meaning=f"일목균형표 구름대 상단(**{int(top_cloud):,}원**)을 첫 돌파하고 전환선≥기준선·후행스팬 주가 위 조건까지 충족한 상승 진입 신호입니다.",
+                    action_guide=(
+                        f"• **진입:** 종가가 구름대 상단(**{int(top_cloud):,}원**) 위로 확정될 때 종가 매수 또는 익일 리테스트 진입\n"
+                        f"• **손절:** 종가 기준 구름대 안으로 재진입(**{int(top_cloud*0.99):,}원** 하회) 시 손절\n"
+                        f"• **목표 / 청산:** 1차 목표(**{int(target_23):,}원**) / 일목 기준선(**{int(k_today):,}원**) 이탈까지 보유"
+                    ),
+                    color=1752220,
+                    fields=[
+                        {"name": "현재가 (등락률)", "value": f"**{int(c):,}원** (`{chg:+.2f}%`)", "inline": True},
+                        {"name": "RVOL / 거래대금", "value": f"{rvol:,.0f}% / {amount_uk:,}억", "inline": True},
+                        {"name": "손절 / 1차목표", "value": f"{int(top_cloud*0.99):,} / {int(target_23):,}원", "inline": True},
+                    ],
+                    mention=True,
+                )
+                if sent_ok:
+                    commit_cooldown(state, code, "NEW_3_CLOUD")
+                    record_today_signal(
+                        state, code, name, market_type, "NEW_3", "3.구름돌파",
+                        entry_price=c, stop_price=top_cloud * 0.99, target_price=target_23,
+                        buy_zone=f"{int(top_cloud):,}~{int(c):,}원"
+                    )
+                    sent_count += 1
 
             # --- [신규 4] 정배열 20일선 첫 눌림 ---
             dd_from_hh20 = ((c / hh20) - 1.0) * 100.0 if hh20 > 0 else 0.0
@@ -1699,8 +1869,8 @@ def main():
                             )
                             sent_count += 1
 
-            # --- [신규 6 & 7] 실시간 지수 ETF 기준 후보 수집 ---
-            if etf_valid and idx_chg is not None:
+            # --- [신규 6 & 7] 실시간 종합지수 기준 후보 수집 ---
+            if idx_valid and idx_chg is not None:
                 last_cd_6 = state["cooldowns"].get(f"{code}:NEW_6_DEFIANT")
                 cd_6_blocked = (
                     last_cd_6 is not None
@@ -1741,23 +1911,32 @@ def main():
                         "chg": chg, "rs_growth": rs_20_growth, "amount_uk": amount_uk,
                     })
 
+        # 장중 누적 거래량 프로파일 기록 (자체 거래량 곡선 보정용 데이터)
+        if total_universe_vol > 0:
+            bucket_key = f"{hhmm // 10 * 10:04d}"
+            state.setdefault("volume_curve_log", {})[bucket_key] = round(total_universe_vol, 0)
+
+        # 기본 경보 일괄 발송 (다수 발생 시 요약 다이제스트 적용)
+        if is_intraday and basic_alerts:
+            sent_count += flush_basic_alerts(webhook_url, state, basic_alerts)
+
         # ==================================================================
         # [C] 후속 트리거 평가 (#4·#6·#7 5거래일 감시) & 성과 CSV 업데이트
         # ==================================================================
         if is_intraday:
-            sent_count += evaluate_follow_up_setups(webhook_url, state, live_snapshots, etf_valid, ks_chg, kq_chg, hhmm)
-        update_signal_csv_performance(state, live_snapshots, hhmm)
+            sent_count += evaluate_follow_up_setups(webhook_url, state, live_snapshots, idx_valid, ks_chg, kq_chg, hhmm, sched)
+        update_signal_csv_performance(state, live_snapshots, is_closing=(not is_intraday))
 
         # ==================================================================
         # [D] 정시 배치 알림 발송 (mention=True로 @everyone 푸시 발송)
         # ==================================================================
         slot_6 = None
-        if 1100 <= hhmm < 1300:
-            slot_6 = "BATCH_6_1100"
-        elif 1420 <= hhmm < 1535:
-            slot_6 = "BATCH_6_1430"
+        if (sched["open_hhmm"] + 200) <= hhmm < (sched["open_hhmm"] + 400):
+            slot_6 = "BATCH_6_MORNING"
+        elif (sched["close_hhmm"] - 110) <= hhmm < sched["closing_check"]:
+            slot_6 = "BATCH_6_AFTERNOON"
 
-        if etf_valid and slot_6 and batch_6_candidates and can_fire_once(state, "MARKET", slot_6):
+        if idx_valid and slot_6 and batch_6_candidates and can_fire_once(state, "MARKET", slot_6):
             top5_6 = sorted(batch_6_candidates, key=lambda x: x["excess"], reverse=True)[:5]
             lines = []
             for item in top5_6:
@@ -1770,7 +1949,7 @@ def main():
                 webhook_url,
                 title=f"🛡️ [지수 급락일 역행 강세주 TOP {len(top5_6)}] ({now.strftime('%H:%M')} 기준)",
                 description=(
-                    f"📖 **알림 의미:** 코스피200(`{ks_chg:+.2f}%`)·코스닥150(`{kq_chg:+.2f}%`) 급락 속 수급이 쏠리는 주도주 후보입니다.\n\n"
+                    f"📖 **알림 의미:** 코스피(`{ks_chg:+.2f}%`)·코스닥(`{kq_chg:+.2f}%`) 급락 속 수급이 쏠리는 주도주 후보입니다.\n\n"
                     + "\n\n".join(lines)
                 ),
                 color=15844367,
@@ -1800,7 +1979,7 @@ def main():
                     )
                 sent_count += 1
 
-        if etf_valid and 1450 <= hhmm < 1535 and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_1500"):
+        if idx_valid and (sched["close_hhmm"] - 40) <= hhmm < sched["closing_check"] and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_CLOSING_RS"):
             valid_7 = [it for it in batch_7_candidates if can_fire_cooldown(state, it["code"], "NEW_7_RS")]
             top5_7 = sorted(valid_7, key=lambda x: x["rs_growth"], reverse=True)[:5]
             if top5_7:
@@ -1831,7 +2010,7 @@ def main():
                     mention=True,
                 )
                 if sent_ok:
-                    commit_once(state, "MARKET", "BATCH_7_1500")
+                    commit_once(state, "MARKET", "BATCH_7_CLOSING_RS")
                     for item in top5_7:
                         commit_cooldown(state, item["code"], "NEW_7_RS")
                         record_today_signal(
@@ -1846,8 +2025,8 @@ def main():
                         )
                     sent_count += 1
 
-        # 8번: 15:35 이후 장 마감 브리핑 TOP 3 (통과 종목 있을 때만 @everyone 멘션)
-        if hhmm >= 1535 and can_fire_once(state, "MARKET", "BATCH_8_CLOSING"):
+        # 8번: 장 마감 이후 브리핑 TOP 3 (통과 종목 있을 때만 @everyone 멘션)
+        if not is_intraday and can_fire_once(state, "MARKET", "BATCH_8_CLOSING"):
             base_scores = {
                 "NEW_1": 30, "NEW_2": 30, "NEW_3": 25,
                 "NEW_6": 25, "NEW_4": 20, "NEW_5": 20, "NEW_7": 15,
@@ -1866,7 +2045,7 @@ def main():
                 if chg <= -5.0:
                     continue
 
-                idx_close_chg = (ks_chg if info["market"] == "KOSPI" else kq_chg) if etf_valid else None
+                idx_close_chg = (ks_chg if info["market"] == "KOSPI" else kq_chg) if idx_valid else None
 
                 valid_sigs = []
                 for sig_id, sig_meta in info["signals"].items():
@@ -1876,24 +2055,21 @@ def main():
                         pl = lv["sweep_pl"]
                         ok = (pl > 0 and pl * 0.97 <= l < pl and c >= pl * 1.005 and c > o and clv >= 0.6)
                         recalc_meta["stop"] = l
-                        raw_t1 = snap["ma20"] if snap["ma20"] > c * 1.05 else max(snap["hh20"], lv["hh60"])
-                        recalc_meta["target"] = max(raw_t1, c * 1.08)
+                        recalc_meta["target"] = snap["ma20"] if snap["ma20"] > c * 1.03 else max(snap["hh20"], lv["hh60"])
                         recalc_meta["buy_zone"] = f"{int(pl):,}~{int(c):,}원"
                     elif sig_id == "NEW_2":
                         r_line = max(snap["ma60"], snap["ma120"])
                         ok = (c > r_line * 1.01)
-                        raw_t23 = lv["hh120"] if lv["hh120"] > c * 1.05 else max(lv["hh240"], c * 1.15)
                         recalc_meta["stop"] = r_line * 0.99
-                        recalc_meta["target"] = max(raw_t23, c * 1.12)
+                        recalc_meta["target"] = lv["hh120"] if lv["hh120"] > c * 1.05 else max(lv["hh240"], c * 1.15)
                         recalc_meta["buy_zone"] = f"{int(r_line):,}~{int(c):,}원"
                     elif sig_id == "NEW_3":
                         top_c = lv["ichimoku_top"]
                         t_val = (max(lv["hh8"], h) + min(lv["ll8"], l)) / 2.0
                         k_val = (max(lv["hh25"], h) + min(lv["ll25"], l)) / 2.0
-                        ok = (top_c > 0 and c > top_c * 1.01 and t_val >= k_val and c > lv["c_26_ago"])
-                        raw_t23 = lv["hh120"] if lv["hh120"] > c * 1.05 else max(lv["hh240"], c * 1.15)
+                        ok = (top_c > 0 and c > top_c * 1.01 and t_val >= k_val and c > lv["c_25_ago"])
                         recalc_meta["stop"] = top_c * 0.99
-                        recalc_meta["target"] = max(raw_t23, c * 1.12)
+                        recalc_meta["target"] = lv["hh120"] if lv["hh120"] > c * 1.05 else max(lv["hh240"], c * 1.15)
                         recalc_meta["buy_zone"] = f"{int(top_c):,}~{int(c):,}원"
                     elif sig_id == "NEW_4":
                         ok = (c >= snap["ma20"] * 0.985 and chg > -5.0 and snap["rvol"] <= 120.0)
@@ -1919,8 +2095,9 @@ def main():
                         recalc_meta["target"] = h * 1.08
                         recalc_meta["buy_zone"] = f"{int(h):,}원 돌파 시"
                     elif sig_id == "NEW_7":
-                        rs_ok = (snap["rs_today"] > lv["max_rs_120"]) if etf_valid else True
-                        ok = (rs_ok and c < lv["hh120"] and c > snap["ma60"])
+                        if not idx_valid:
+                            continue
+                        ok = (snap["rs_today"] > lv["max_rs_120"] and c < lv["hh120"] and c > snap["ma60"])
                         recalc_meta["stop"] = snap["ma20"]
                         recalc_meta["target"] = lv["hh120"]
                         recalc_meta["buy_zone"] = f"20일선({int(snap['ma20']):,}원) 눌림 or {int(lv['hh120']):,}원 돌파"
@@ -1975,12 +2152,16 @@ def main():
                     "rr": rr,
                 })
 
+            sync_closing_csv_targets(state["date"], closing_validated_map)
+
             setups = state.get("active_setups", {})
             for key, st in list(setups.items()):
                 if st.get("created_date") == state["date"]:
                     s_code = st["code"]
                     s_id = st["sig_id"]
                     snap = live_snapshots.get(s_code)
+                    if s_id == "NEW_7" and not idx_valid:
+                        continue
                     survived = (s_code in closing_validated_map) and (s_id in closing_validated_map[s_code])
                     if not survived or not snap:
                         setups.pop(key, None)
@@ -1992,11 +2173,11 @@ def main():
                         st["target_price"] = float(meta["target"])
 
             hl = state.get("health", {})
-            etf_stat = "실시간정상" if etf_valid else ("일부조회" if raw_etf_ok else "미조회")
+            idx_stat = "실시간정상" if idx_valid else "일부지연"
             health_line = (
                 f"🩺 **시스템 헬스체크:** 스캔 `{hl.get('target_cnt', 400)}종목` | "
-                f"기준선 성공 `{hl.get('levels_ok', len(state['levels']))}건` (KRX `{hl.get('krx_cnt', 0)}` / 폴백 `{hl.get('fb_cnt', 0)}`) | "
-                f"지수ETF `{etf_stat}`"
+                f"기준선 `{hl.get('levels_ok', len(state['levels']))}건` (신규IPO제외 `{hl.get('short_hist_cnt', 0)}`) | "
+                f"지수 `{idx_stat}`"
             )
 
             weekly_summary = build_weekly_performance_summary() if now.weekday() == 4 else ""
@@ -2007,7 +2188,7 @@ def main():
                     webhook_url,
                     title=f"📋 [{state['date']} 장 마감 브리핑]",
                     description=(
-                        "📖 **알림 의미:** 장중 발생한 시그널을 15:30 정규장 확정 종가 기준으로 재검증한 결과, 내일 시초가 공략 기준(손익비 1:1 이상)을 통과한 종목이 없습니다.\n\n"
+                        "📖 **알림 의미:** 장중 발생한 시그널을 정규장 확정 종가 기준으로 재검증한 결과, 내일 시초가 공략 기준(손익비 1:1 이상)을 통과한 종목이 없습니다.\n\n"
                         "🧭 **행동 지침:** 무리한 신규 진입 없이 현금을 보유하며 다음 거래일 장중 시그널을 대기하세요."
                         + footer_block
                     ),
@@ -2029,7 +2210,7 @@ def main():
                     webhook_url,
                     title=f"🏆 [{state['date']} 장 마감 브리핑 TOP {len(top3)}]",
                     description=(
-                        "📖 **알림 의미:** 당일 포착 시그널을 15:30 정규장 확정 종가 기준으로 재검증·재계산하여 선별한 내일 시초가 최우선 관심종목입니다.\n\n"
+                        "📖 **알림 의미:** 당일 포착 시그널을 정규장 확정 종가 기준으로 재검증·재계산하여 선별한 내일 시초가 최우선 관심종목입니다.\n\n"
                         + "\n\n".join(lines)
                         + footer_block
                     ),
