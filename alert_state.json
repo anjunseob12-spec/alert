@@ -60,6 +60,12 @@
     ],
     "376270": [
       "DROP_-5.0"
+    ],
+    "019570": [
+      "HIST_LOW"
+    ],
+    "204620": [
+      "VOL_SURGE"
     ]
   },
   "cooldowns": {
@@ -9304,7 +9310,7 @@
     "target_cnt": 200,
     "levels_ok": 198,
     "krx_cnt": 0,
-    "fb_cnt": 216,
+    "fb_cnt": 219,
     "fail_cnt": 0
   }
 }
