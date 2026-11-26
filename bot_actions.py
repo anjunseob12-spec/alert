@@ -1,14 +1,14 @@
 """
-[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v11.0)]
+[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v12.0)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
-- 핵심 개선 (v11.0):
-  1. KRX 애프터마켓(16:00~20:00) 대비 공식 전일 종가(ListingClose) 보존 및 불일치 검증 로그
-  2. ETF/KR 실제 종목코드 집합 기반 필터링 (BNK금융지주·HK이노엔 등 정상주 누락 방지)
-  3. 비캐시 첫 실행 시 어제 거래량 혼입(VOL_SURGE 오탐) 완전 차단
-  4. 직전 거래일(STALE) 검증, 신규 IPO(130일 미만) 당일 스킵, 7일 주기 전체조회 분산, 원자적 JSON 저장
-  5. 코스피·코스닥 종합지수 fchart 실시간 직접 조회로 RS(상대강도) 정확도 확보
-  6. KRX 장중 U자 거래량 곡선, 목표가/손익비 일원화, 트리거 발동(NEW_4T/6T/7T) CSV 별도 기록
-  7. 특수 장 운영일(수능일·새해 첫 거래일) 자동 시간 보정 및 일목균형표 25봉 시점 일치
+- 주요 반영 (v12.0):
+  1. 네이버 모바일 basic API 기반 공식 기준가(전일 종가) 직접 산출 및 일일 캐시 (애프터마켓·권리락 오탐 차단)
+  2. 배포 당일 버전 변경 시 alerted/cooldowns 보존 + universe/levels/index_base 초기화로 크래시 방지
+  3. 네이버 모바일 시총 JSON API 폴백 + endswith("0") 우선주 필터 + 수정주가 리셋 카운터
+  4. hhmm_add() 60진법 시간 연산, fchart 005930 직전 거래일 교차검증, 지수 복구 시 RS 캐시 재계산
+  5. 기본 경보 심각도 우선순위 정렬 다이제스트 + 실제 표출 항목만 상태 커밋
+  6. volume_curve_history.csv 장중 누적 거래량 비율 실측 저장 및 N일 평균 RVOL 보정
+  7. 특수 장 운영일 수동 테이블(SPECIAL_SESSIONS) 적용 및 일목균형표 25봉 시점 일치
 """
 
 import os
@@ -26,6 +26,8 @@ import FinanceDataReader as fdr
 KST = timezone(timedelta(hours=9))
 STATE_FILE = "alert_state.json"
 CSV_FILE = "signal_history.csv"
+VOL_CURVE_FILE = "volume_curve_history.csv"
+CURRENT_VERSION = 12
 
 CSV_HEADERS = [
     "date", "code", "name", "market", "sig_id", "sig_label",
@@ -33,11 +35,17 @@ CSV_HEADERS = [
     "days_elapsed", "d1_ret", "d5_ret", "max_high", "min_low", "outcome"
 ]
 
+VOL_CURVE_BUCKETS = [
+    f"{h:02d}{m:02d}"
+    for h in range(9, 16)
+    for m in range(0, 60, 10)
+    if (h * 100 + m) >= 910 and (h * 100 + m) <= 1530
+]
+
 # 특수 장 운영일 수동 테이블 ("YYYY-MM-DD": (개장HHMM, 마감HHMM))
 SPECIAL_SESSIONS = {
     "2026-11-19": (1000, 1630),
     "2027-01-04": (1000, 1530),
-    "2027-11-18": (1000, 1630),
 }
 
 CONFIG = {
@@ -76,23 +84,26 @@ def _safe_float(val, default=0.0):
         return default
 
 
+def hhmm_add(hhmm, minutes):
+    t = (hhmm // 100) * 60 + (hhmm % 100) + minutes
+    return (t // 60) * 100 + (t % 60)
+
+
 def get_session_schedule(date_str):
     open_hhmm, close_hhmm = SPECIAL_SESSIONS.get(date_str, (900, 1530))
     open_h, open_m = divmod(open_hhmm, 100)
     close_h, close_m = divmod(close_hhmm, 100)
     total_min = float((close_h * 60 + close_m) - (open_h * 60 + open_m))
-    start_check = open_h * 100 + (open_m + 5)
-    after_1h = (open_h + 1) * 100 + open_m
-    closing_check = close_h * 100 + (close_m + 5)
     return {
         "open_hhmm": open_hhmm,
         "close_hhmm": close_hhmm,
         "open_h": open_h,
         "open_m": open_m,
         "total_min": max(60.0, total_min),
-        "start_check": start_check,
-        "after_1h": after_1h,
-        "closing_check": closing_check,
+        "start_check": hhmm_add(open_hhmm, 5),
+        "after_30m": hhmm_add(open_hhmm, 30),
+        "after_1h": hhmm_add(open_hhmm, 60),
+        "closing_check": hhmm_add(close_hhmm, 5),
     }
 
 
@@ -100,8 +111,9 @@ def load_state():
     today = datetime.now(KST).strftime("%Y-%m-%d")
     default_state = {
         "date": today,
-        "version": 11,
+        "version": CURRENT_VERSION,
         "universe": [],
+        "base_prices": {},
         "short_hist": [],
         "level_retries": {},
         "volume_curve_log": {},
@@ -121,9 +133,18 @@ def load_state():
             with open(STATE_FILE, "r", encoding="utf-8") as f:
                 data = json.load(f)
             if data.get("date") == today:
+                if data.get("version") != CURRENT_VERSION:
+                    # 배포 당일 버전 변경 시 중복 방지 기록은 유지하고 캐시 스키마만 안전 초기화
+                    for keep_key in (
+                        "alerted", "cooldowns", "today_signals", "active_setups",
+                        "hist_lows", "hist_low_dates", "trading_dates",
+                        "short_hist", "level_retries", "base_prices", "volume_curve_log",
+                    ):
+                        if keep_key in data:
+                            default_state[keep_key] = data[keep_key]
+                    return default_state
                 for k, v in default_state.items():
                     data.setdefault(k, v)
-                data["version"] = 11
                 return data
             default_state["cooldowns"] = data.get("cooldowns", {})
             default_state["hist_lows"] = data.get("hist_lows", {})
@@ -362,7 +383,7 @@ def update_signal_csv_performance(state, live_snapshots, is_closing):
 
         if is_closing:
             ret_pct = round(((c / entry_p) - 1.0) * 100.0, 2) if entry_p > 0 else 0.0
-            if diff >= 1 and r.get("d1_ret") == "":
+            if diff == 1 and r.get("d1_ret") == "":
                 r["d1_ret"] = ret_pct
                 changed = True
             if diff >= 5 and r.get("d5_ret") == "":
@@ -420,6 +441,35 @@ def build_weekly_performance_summary():
             f"• `{label}` ({g['cnt']}건/종료{g['closed']}): D+1 `{d1_avg}` | D+5 `{d5_avg}` | 목표 `{t_rate:.0f}%` / 손절 `{s_rate:.0f}%`"
         )
     return "\n".join(lines)
+
+
+def save_daily_volume_curve(date_str, curve_log, final_vol):
+    if final_vol <= 0 or not curve_log:
+        return
+    headers = ["date"] + VOL_CURVE_BUCKETS
+    rows = []
+    if os.path.exists(VOL_CURVE_FILE):
+        try:
+            with open(VOL_CURVE_FILE, "r", newline="", encoding="utf-8-sig") as f:
+                rows = [r for r in csv.DictReader(f) if r.get("date") != date_str]
+        except Exception:
+            rows = []
+
+    new_row = {"date": date_str}
+    for b in VOL_CURVE_BUCKETS:
+        val = curve_log.get(b)
+        if val is not None and val > 0:
+            ratio = min(1.0, max(0.01, float(val) / float(final_vol)))
+            new_row[b] = round(ratio, 4)
+        else:
+            new_row[b] = ""
+    rows.append(new_row)
+    rows = rows[-20:]
+
+    with open(VOL_CURVE_FILE, "w", newline="", encoding="utf-8-sig") as f:
+        writer = csv.DictWriter(f, fieldnames=headers)
+        writer.writeheader()
+        writer.writerows(rows)
 
 
 def send_discord_embed(webhook_url, title, description, color, fields=None, author_text=None, mention=False):
@@ -565,6 +615,92 @@ def fetch_naver_intraday_quotes(codes):
     return quotes
 
 
+def fetch_naver_basic_base_prices(codes):
+    """네이버 모바일 basic API에서 공식 기준가(전일 종가) 직접 산출"""
+    result = {}
+    over_diff_cnt = 0
+    over_checked_cnt = 0
+    code_list = list(dict.fromkeys(_norm_code(c) for c in codes if c))
+
+    session = requests.Session()
+    adapter = HTTPAdapter(pool_connections=16, pool_maxsize=16)
+    session.mount("https://", adapter)
+    session.headers.update({
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36",
+        "Referer": "https://m.stock.naver.com/",
+        "Accept": "application/json",
+    })
+
+    def _fetch_one(cd):
+        url = f"https://m.stock.naver.com/api/stock/{cd}/basic"
+        try:
+            res = session.get(url, timeout=8)
+            if res.status_code != 200:
+                return cd, 0.0, False
+            data = res.json()
+            cp = _safe_float(data.get("closePrice"))
+            diff = abs(_safe_float(data.get("compareToPreviousClosePrice")))
+            ratio = _safe_float(data.get("fluctuationsRatio"))
+            dir_code = str((data.get("compareToPreviousPrice") or {}).get("code", ""))
+            if cp <= 0:
+                return cd, 0.0, False
+
+            if dir_code in ("1", "2"):
+                base_p = cp - diff
+            elif dir_code in ("4", "5"):
+                base_p = cp + diff
+            elif dir_code == "3":
+                base_p = cp
+            elif ratio > 0:
+                base_p = cp - diff
+            elif ratio < 0:
+                base_p = cp + diff
+            else:
+                base_p = cp
+
+            over_info = data.get("overMarketPriceInfo") or {}
+            over_p = _safe_float(over_info.get("overPrice"))
+            has_over_gap = (over_p > 0 and abs(over_p - cp) > 0.01)
+            return cd, (round(base_p, 4) if base_p > 0 else 0.0), has_over_gap
+        except Exception:
+            return cd, 0.0, False
+
+    try:
+        with ThreadPoolExecutor(max_workers=12) as executor:
+            for cd, bp, over_gap in executor.map(_fetch_one, code_list):
+                if bp > 0:
+                    result[cd] = bp
+                    over_checked_cnt += 1
+                    if over_gap:
+                        over_diff_cnt += 1
+    finally:
+        session.close()
+
+    if over_checked_cnt > 0:
+        print(f"모바일 basic 기준가 확보: {len(result)}/{len(code_list)}종목 (애프터마켓 가격괴리 진단: {over_diff_cnt}/{over_checked_cnt})")
+    return result
+
+
+def _fetch_fchart_prev_trading_day(code, today_ymd):
+    url = f"https://fchart.stock.naver.com/sise.nhn?symbol={code}&timeframe=day&count=5&requestType=0"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Referer": "https://finance.naver.com/",
+    }
+    try:
+        res = requests.get(url, headers=headers, timeout=8)
+        res.raise_for_status()
+        items = re.findall(r'data="([^"]+)"', res.text)
+        past_dates = []
+        for item in items:
+            raw_d = item.split("|")[0].strip()
+            if len(raw_d) == 8 and raw_d.isdigit() and raw_d < today_ymd:
+                past_dates.append(f"{raw_d[:4]}-{raw_d[4:6]}-{raw_d[6:8]}")
+        return past_dates[-1] if past_dates else ""
+    except Exception:
+        return ""
+
+
 def _fetch_index_fchart_full(idx_code, today_str):
     sym = "KOSPI" if idx_code == "KS11" else "KOSDAQ"
     url = f"https://fchart.stock.naver.com/sise.nhn?symbol={sym}&timeframe=day&count=180&requestType=0"
@@ -614,6 +750,7 @@ def check_trading_day_and_index_history(state, hhmm, sched):
         return False, {}
 
     today_str = state["date"]
+    today_ymd = today_str.replace("-", "")
     probe_live = fetch_naver_intraday_quotes(["005930"])
     if "005930" not in probe_live:
         print(f"오늘은 휴장일입니다 ({today_str} 삼성전자 장중 체결 없음). 알림 없이 종료합니다.")
@@ -633,6 +770,14 @@ def check_trading_day_and_index_history(state, hhmm, sched):
     probe_dates = [str(d)[:10] for d in probe_df.index]
     if probe_dates[-1] != today_str:
         probe_dates.append(today_str)
+
+    # FDR 직전 거래일과 fchart 005930 직전 봉 날짜 교차 검증 (FDR 지연 방어)
+    fchart_prev = _fetch_fchart_prev_trading_day("005930", today_ymd)
+    fdr_prev = probe_dates[-2] if len(probe_dates) >= 2 else ""
+    if fchart_prev and fdr_prev and fchart_prev > fdr_prev:
+        print(f"경고: FDR 직전 거래일({fdr_prev}) 지연 감지 -> fchart 기준({fchart_prev})으로 교정")
+        probe_dates = probe_dates[:-1] + [fchart_prev, today_str]
+
     state["trading_dates"] = probe_dates[-160:]
     prev_trading_day = state["trading_dates"][-2] if len(state["trading_dates"]) >= 2 else ""
 
@@ -687,41 +832,44 @@ def _get_etf_code_set():
 
 
 def _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes):
-    sosok = "0" if market == "KOSPI" else "1"
+    """네이버 모바일 시총 JSON API 우선 조회, 실패 시 HTML 폴백"""
     seen = set()
     rows = []
 
     with requests.Session() as session:
         session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Referer": "https://finance.naver.com/sise/sise_market_sum.naver",
-            "Accept-Language": "ko-KR,ko;q=0.9",
+            "User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/126.0 Mobile Safari/537.36",
+            "Referer": "https://m.stock.naver.com/",
+            "Accept": "application/json",
         })
-        for page in range(1, 21):
-            url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
-            matches = []
+        for page in range(1, 9):
+            url = f"https://m.stock.naver.com/api/stocks/marketValue/{market}?page={page}&pageSize=100"
+            stocks = []
             for attempt in range(3):
                 try:
                     res = session.get(url, timeout=10)
                     res.raise_for_status()
-                    html = res.content.decode("cp949", errors="replace")
-                    matches = re.findall(r'href="/item/main\.naver\?code=([0-9A-Za-z]{6})"[^>]*>([^<]+)</a>', html)
-                    if matches:
+                    data = res.json()
+                    stocks = data.get("stocks") or []
+                    if stocks:
                         break
                 except Exception as e:
                     if attempt == 2:
-                        print(f"네이버 시총 폴백 페이지({market} p.{page}) 오류: {e}")
-                time.sleep(0.6 * (attempt + 1))
+                        print(f"네이버 모바일 시총 API({market} p.{page}) 오류: {e}")
+                time.sleep(0.4 * (attempt + 1))
 
-            for raw_cd, nm in matches:
-                cd = _norm_code(raw_cd)
-                if cd in seen:
+            if not stocks:
+                break
+
+            for st in stocks:
+                cd = _norm_code(st.get("itemCode", ""))
+                clean_nm = str(st.get("stockName", "")).strip()
+                if not cd or cd in seen:
                     continue
                 seen.add(cd)
-                clean_nm = nm.strip()
                 if cd in etf_codes:
                     continue
-                if CONFIG["EXCLUDE_PREFERRED"] and cd.isdigit() and not cd.endswith("0"):
+                if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
                     continue
                 if (
                     "스팩" in clean_nm
@@ -732,9 +880,44 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes):
                     continue
                 rows.append({"Code": cd, "Name": clean_nm, "MarketType": market, "ListingClose": 0.0})
 
-            if len(rows) >= CONFIG["TOP_N"] and (not tracked_codes or tracked_codes.issubset(seen) or page >= 15):
+            if len(rows) >= CONFIG["TOP_N"] and (not tracked_codes or tracked_codes.issubset(seen) or page >= 5):
                 break
-            time.sleep(0.25)
+            time.sleep(0.15)
+
+    # 모바일 API가 막혔을 경우 레거시 HTML 2차 폴백
+    if len(rows) < CONFIG["TOP_N"]:
+        sosok = "0" if market == "KOSPI" else "1"
+        with requests.Session() as session:
+            session.headers.update({
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                "Referer": "https://finance.naver.com/sise/sise_market_sum.naver",
+            })
+            for page in range(1, 16):
+                url = f"https://finance.naver.com/sise/sise_market_sum.naver?sosok={sosok}&page={page}"
+                try:
+                    res = session.get(url, timeout=10)
+                    html = res.content.decode("cp949", errors="replace")
+                    matches = re.findall(r'href="/item/main\.naver\?code=([0-9A-Za-z]{6})"[^>]*>([^<]+)</a>', html)
+                    if not matches:
+                        break
+                    for raw_cd, nm in matches:
+                        cd = _norm_code(raw_cd)
+                        if cd in seen:
+                            continue
+                        seen.add(cd)
+                        clean_nm = nm.strip()
+                        if cd in etf_codes:
+                            continue
+                        if CONFIG["EXCLUDE_PREFERRED"] and not cd.endswith("0"):
+                            continue
+                        if "스팩" in clean_nm or "ETN" in clean_nm or "ETF" in clean_nm or re.search(r"\d+호$", clean_nm):
+                            continue
+                        rows.append({"Code": cd, "Name": clean_nm, "MarketType": market, "ListingClose": 0.0})
+                except Exception:
+                    break
+                if len(rows) >= CONFIG["TOP_N"]:
+                    break
+                time.sleep(0.2)
 
     df = pd.DataFrame(rows)
     if df.empty:
@@ -750,13 +933,11 @@ def _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes):
 
 def fetch_top_universe_and_etf(state, live_indices):
     cached_universe = state.get("universe") or []
-    is_fresh_listing = False
 
     if len(cached_universe) >= CONFIG["TOP_N"] * 2:
         combined = pd.DataFrame(cached_universe)
         print(f"당일 유니버스 캐시 사용 ({len(combined)}종목)")
     else:
-        is_fresh_listing = True
         tracked_codes = {_norm_code(st["code"]) for st in state.get("active_setups", {}).values()} | get_open_csv_codes()
         etf_codes = _get_etf_code_set()
 
@@ -772,7 +953,7 @@ def fetch_top_universe_and_etf(state, live_indices):
                 if etf_codes:
                     df = df[~df["Code"].isin(etf_codes)]
                 if CONFIG["EXCLUDE_PREFERRED"]:
-                    df = df[~df["Code"].str.isdigit() | df["Code"].str.endswith("0")]
+                    df = df[df["Code"].str.endswith("0")]
                 if "Marcap" in df.columns:
                     df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
                     df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
@@ -799,7 +980,7 @@ def fetch_top_universe_and_etf(state, live_indices):
                 print(f"KRX {market} 목록 조회 보완 -> 네이버 시총 순위 폴백 사용: {e}")
                 fb_df = _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes)
                 if len(fb_df) < CONFIG["TOP_N"]:
-                    time.sleep(2.0)
+                    time.sleep(1.5)
                     retry_df = _fetch_naver_market_cap_fallback(market, tracked_codes, etf_codes)
                     if len(retry_df) > len(fb_df):
                         fb_df = retry_df
@@ -823,9 +1004,19 @@ def fetch_top_universe_and_etf(state, live_indices):
     # 어제 종가·거래량 혼입 방지를 위해 실시간 컬럼은 전부 0.0으로 초기화
     for col in ["Open", "High", "Close", "Low", "ChagesRatio", "Volume", "Amount", "NaverPrevClose"]:
         combined[col] = 0.0
-    combined["ListingClose"] = pd.to_numeric(combined.get("ListingClose", 0.0), errors="coerce").fillna(0.0)
+    if "ListingClose" not in combined.columns:
+        combined["ListingClose"] = 0.0
+    combined["ListingClose"] = pd.to_numeric(combined["ListingClose"], errors="coerce").fillna(0.0)
 
     all_codes = combined["Code"].tolist()
+
+    # 모바일 basic API로 당일 공식 기준가(전일 종가) 1회 확보 후 state에 캐시
+    base_prices_cache = state.setdefault("base_prices", {})
+    missing_bp = [cd for cd in all_codes if _norm_code(cd) not in base_prices_cache]
+    if missing_bp:
+        fetched_bp = fetch_naver_basic_base_prices(missing_bp)
+        base_prices_cache.update(fetched_bp)
+
     live_quotes = fetch_naver_intraday_quotes(all_codes)
     if live_quotes:
         synced_cnt = 0
@@ -845,12 +1036,6 @@ def fetch_top_universe_and_etf(state, live_indices):
         sample_ss = live_quotes.get("005930")
         sample_txt = f" | 삼성전자 {sample_ss['ChagesRatio']:+.2f}%" if sample_ss else ""
         print(f"실시간 시세 동기화: {synced_cnt}/{len(combined)}종목{sample_txt}")
-
-        if is_fresh_listing and (combined["ListingClose"] > 0).any():
-            valid_mask = (combined["ListingClose"] > 0) & (combined["NaverPrevClose"] > 0)
-            if valid_mask.any():
-                gap = (combined.loc[valid_mask, "NaverPrevClose"] / combined.loc[valid_mask, "ListingClose"] - 1.0).abs()
-                print(f"전일종가 불일치(>0.1%, 애프터마켓 영향 진단): {(gap > 0.001).sum()}/{valid_mask.sum()}종목")
     else:
         print("경고: 네이버 실시간 시세 조회 실패 -> 금일 시세 없음으로 스킵")
 
@@ -888,13 +1073,14 @@ def _need_full_hist_refresh(code, today_str, last_refreshed_str, cached_hist_low
     try:
         d1 = datetime.strptime(last_refreshed_str, "%Y-%m-%d")
         d2 = datetime.strptime(today_str, "%Y-%m-%d")
-        days_passed = (d2 - d1).days
-        if days_passed < CONFIG["HIST_LOW_REFRESH_DAYS"]:
+        # 평일(거래일) 기준 분산: 주말 몰림 없이 5개 버킷으로 균등 분산
+        bdays = len(pd.bdate_range(d1, d2)) - 1
+        if bdays < 5:
             return False
-        # 400종목 전체 재조회가 하루에 몰리지 않도록 종목코드별 요일 분산 (최대 13일 내 분산 갱신)
-        if days_passed < CONFIG["HIST_LOW_REFRESH_DAYS"] + 6:
-            bucket = int(code, 36) % 7
-            return bucket == (d2.toordinal() % 7)
+        if bdays < 10:
+            bucket = int(code, 36) % 5
+            today_b_ord = len(pd.bdate_range("2020-01-01", d2))
+            return bucket == (today_b_ord % 5)
         return True
     except Exception:
         return True
@@ -1072,7 +1258,8 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
             idx_c = idx_closes_map.get(d_str)
             if idx_c and idx_c > 0:
                 rs_vals.append(float(c.iloc[i]) / idx_c)
-        max_rs_120 = max(rs_vals) if len(rs_vals) >= 60 else 0.0
+        rs_valid = (len(rs_vals) >= 60)
+        max_rs_120 = max(rs_vals) if rs_valid else 0.0
         rs_20_ago = rs_vals[-20] if len(rs_vals) >= 20 else 0.0
 
         rs_new_10d = False
@@ -1117,6 +1304,7 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
             "min_chg_4d": min_chg_4d,
             "ma20_touch_10d": ma20_touch_10d,
             "candle_b": candle_b,
+            "rs_valid": rs_valid,
             "max_rs_120": max_rs_120,
             "rs_new_10d": rs_new_10d,
             "rs_20_ago": rs_20_ago,
@@ -1127,6 +1315,7 @@ def _calc_single_stock_levels(code, market_type, idx_closes_map, cached_hist_low
 
 def ensure_daily_levels(state, df):
     idx_base = state.get("index_base", {})
+    idx_hist_ok = idx_base.get("valid", False)
     ks_map = idx_base.get("KS11", {}).get("closes_map", {})
     kq_map = idx_base.get("KQ11", {}).get("closes_map", {})
     hist_lows_cache = state.setdefault("hist_lows", {})
@@ -1142,7 +1331,17 @@ def ensure_daily_levels(state, df):
         code = _norm_code(row["Code"])
         if code in short_hist_set or retries.get(code, 0) >= 2:
             continue
-        if code not in state["levels"]:
+        existing_lv = state["levels"].get(code)
+        # 첫 실행 때 지수 히스토리가 무효해 RS=0으로 캐시됐고 이후 지수가 복구된 경우 재계산 허용
+        need_rs_rebuild = (
+            existing_lv is not None
+            and idx_hist_ok
+            and not existing_lv.get("rs_valid", False)
+            and retries.get(f"{code}:RS", 0) < 1
+        )
+        if existing_lv is None or need_rs_rebuild:
+            if need_rs_rebuild:
+                retries[f"{code}:RS"] = 1
             c_low = hist_lows_cache.get(code)
             need_full = _need_full_hist_refresh(code, today_str, hist_low_dates.get(code), c_low)
             missing.append((code, row["MarketType"], c_low, need_full))
@@ -1153,7 +1352,7 @@ def ensure_daily_levels(state, df):
     full_cnt = sum(1 for _, _, _, nf in missing if nf)
     workers = 4 if full_cnt >= 30 else 8
     print(f"금일 기준선 계산 중 ({len(missing)}종목, 전체재조회 {full_cnt}종목, workers={workers})...")
-    ok_cnt, stale_cnt, fail_cnt = 0, 0, 0
+    stale_cnt, fail_cnt = 0, 0
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = {
@@ -1182,7 +1381,6 @@ def ensure_daily_levels(state, df):
                     fail_cnt += 1
                 continue
 
-            ok_cnt += 1
             if h_low and h_low > 0:
                 hist_lows_cache[code] = h_low
                 if was_full or code not in hist_low_dates:
@@ -1201,8 +1399,33 @@ def ensure_daily_levels(state, df):
     }
 
 
+def _load_empirical_volume_curve():
+    if not os.path.exists(VOL_CURVE_FILE):
+        return None
+    try:
+        with open(VOL_CURVE_FILE, "r", newline="", encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        if len(rows) < 3:
+            return None
+
+        pts = [(0.0, 0.050)]
+        last_y = 0.050
+        for b in VOL_CURVE_BUCKETS[:-1]:
+            vals = [float(r[b]) for r in rows if r.get(b) not in (None, "")]
+            if len(vals) >= 3:
+                bh, bm = int(b[:2]), int(b[2:])
+                prog = ((bh * 60 + bm) - 540) / 390.0
+                avg_r = max(last_y, sum(vals) / len(vals))
+                pts.append((prog, min(0.99, avg_r)))
+                last_y = avg_r
+        pts.append((1.0, 1.0))
+        return pts if len(pts) >= 5 else None
+    except Exception:
+        return None
+
+
 def get_market_elapsed_ratio(sched):
-    """KRX 장중 U자 누적 거래량 비율 곡선 적용 (오전 RVOL 과대평가 보정)"""
+    """실측 누적 거래량 곡선(3일 이상 축적 시) 또는 KRX U자 기본 곡선 적용"""
     now = datetime.now(KST)
     hhmm = now.hour * 100 + now.minute
     if hhmm < sched["start_check"] or hhmm >= sched["close_hhmm"]:
@@ -1212,17 +1435,17 @@ def get_market_elapsed_ratio(sched):
     elapsed_min = max(5.0, (now - market_open).total_seconds() / 60.0)
     progress = min(1.0, elapsed_min / sched["total_min"])
 
-    # 정규장 390분 기준 KRX 경험적 누적 거래량 비율 곡선
-    curve = [
+    empirical_curve = _load_empirical_volume_curve() if sched["total_min"] == 390.0 else None
+    curve = empirical_curve or [
         (0.000, 0.055),
-        (0.038, 0.145),  # +15분
-        (0.077, 0.230),  # +30분
-        (0.154, 0.350),  # +60분
-        (0.308, 0.500),  # +120분
-        (0.538, 0.680),  # +210분
-        (0.769, 0.840),  # +300분
-        (0.923, 0.930),  # +360분
-        (1.000, 1.000),  # 마감
+        (0.038, 0.145),
+        (0.077, 0.230),
+        (0.154, 0.350),
+        (0.308, 0.500),
+        (0.538, 0.680),
+        (0.769, 0.840),
+        (0.923, 0.930),
+        (1.000, 1.000),
     ]
     for i in range(1, len(curve)):
         x0, y0 = curve[i - 1]
@@ -1240,7 +1463,7 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, idx_valid, ks_
     today = state["date"]
     sent = 0
     to_remove = []
-    near_close_hhmm = sched["close_hhmm"] - 15
+    near_close_hhmm = hhmm_add(sched["close_hhmm"], -15)
 
     for key, st in list(setups.items()):
         created = st["created_date"]
@@ -1293,9 +1516,10 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, idx_valid, ks_
             continue
 
         trigger_reason = None
-        if sig_id == "NEW_4":
-            if c > ma20 and c > o and c > lv["prev_close"]:
-                trigger_reason = f"20일선({int(ma20):,}원) 위 양봉 전환 및 전일 종가({int(lv['prev_close']):,}원) 돌파 확인"
+        if sig_id == "NEW_4" and hhmm >= sched["after_30m"]:
+            ref_pc = snap["ref_prev_close"]
+            if c > ma20 and c > o and c > ref_pc:
+                trigger_reason = f"20일선({int(ma20):,}원) 위 양봉 전환 및 전일 종가({int(ref_pc):,}원) 돌파 확인"
             elif h > lv["prev_high"] and c > ma20:
                 trigger_reason = f"20일선({int(ma20):,}원) 지지 속 직전 거래일 고가({int(lv['prev_high']):,}원) 돌파 확인"
         elif sig_id == "NEW_6":
@@ -1323,7 +1547,6 @@ def evaluate_follow_up_setups(webhook_url, state, live_snapshots, idx_valid, ks_
                 mention=True,
             )
             if ok:
-                # 실제 진입 트리거 시점을 별도 행(NEW_4T/6T/7T)으로 CSV에 기록
                 append_signal_csv(
                     date_str=today,
                     code=code,
@@ -1347,10 +1570,13 @@ def flush_basic_alerts(webhook_url, state, basic_alerts):
     if not basic_alerts:
         return 0
 
+    # 심각도 순 정렬: -15% > -10% > 역사적저점 > -5% > 거래폭발 > 스윙전저점
+    sorted_alerts = sorted(basic_alerts, key=lambda x: (x.get("priority", 99), -abs(x.get("abs_chg", 0.0))))
+
     sent = 0
     limit = CONFIG["MAX_INDIVIDUAL_BASIC_ALERTS"]
-    direct_list = basic_alerts[:limit]
-    overflow_list = basic_alerts[limit:]
+    direct_list = sorted_alerts[:limit]
+    overflow_list = sorted_alerts[limit:]
 
     for item in direct_list:
         ok = send_individual_card(
@@ -1369,24 +1595,33 @@ def flush_basic_alerts(webhook_url, state, basic_alerts):
             sent += 1
 
     if overflow_list:
-        summary_lines = [f"• **{it['title']}** — `{it['summary']}`" for it in overflow_list[:20]]
-        if len(overflow_list) > 20:
-            summary_lines.append(f"• 외 {len(overflow_list) - 20}건 동시 포착")
-        ok = send_discord_embed(
-            webhook_url,
-            title=f"📦 [장중 기본 경보 요약 {len(overflow_list)}건]",
-            description=(
-                "📖 **알림 의미:** 단시간 내 다수 종목에서 급락·거래폭발·지지선 경보가 동시에 발생하여 알림 폭주를 막기 위해 요약 묶음으로 발송합니다.\n\n"
-                + "\n".join(summary_lines)
-            ),
-            color=15105570,
-            mention=False,
-        )
-        if ok:
-            for it in overflow_list:
-                for ev_key in it["commit_keys"]:
-                    commit_once(state, it["code"], ev_key)
-            sent += 1
+        summary_lines = []
+        included_items = []
+        total_len = 0
+        for it in overflow_list:
+            line = f"• **{it['title']}** — `{it['summary']}`"
+            if total_len + len(line) + 2 > 3600:
+                break
+            summary_lines.append(line)
+            included_items.append(it)
+            total_len += len(line) + 1
+
+        if included_items:
+            ok = send_discord_embed(
+                webhook_url,
+                title=f"📦 [장중 기본 경보 요약 {len(included_items)}건]",
+                description=(
+                    "📖 **알림 의미:** 단시간 내 다수 종목에서 경보가 동시에 발생하여 알림 폭주를 막기 위해 요약 묶음으로 발송합니다.\n\n"
+                    + "\n".join(summary_lines)
+                ),
+                color=15105570,
+                mention=False,
+            )
+            if ok:
+                for it in included_items:
+                    for ev_key in it["commit_keys"]:
+                        commit_once(state, it["code"], ev_key)
+                sent += 1
 
     return sent
 
@@ -1425,6 +1660,8 @@ def main():
         elapsed_ratio = get_market_elapsed_ratio(sched)
         buffer_mult = 1.0 + (CONFIG["LOW_TOUCH_BUFFER_PCT"] / 100.0)
         total_universe_vol = 0.0
+        base_prices_cache = state.get("base_prices", {})
+        retries = state.setdefault("level_retries", {})
 
         for _, row in df.iterrows():
             code = _norm_code(row["Code"])
@@ -1440,17 +1677,21 @@ def main():
             if not lv:
                 continue
 
-            # 수정주가(권리락·액면분할) 감지: 애프터마켓(±10%) 오탐 방지를 위해 18% 이상 괴리만 리셋
+            # 수정주가(권리락·액면분할) 감지: 18% 이상 괴리 시 캐시 삭제 + 재시도 카운터 증가로 무한루프 차단
             naver_prev = float(row["NaverPrevClose"]) if ("NaverPrevClose" in row and pd.notna(row["NaverPrevClose"])) else 0.0
             if naver_prev > 0 and lv["prev_close"] > 0 and abs(naver_prev - lv["prev_close"]) / lv["prev_close"] > 0.18:
                 state.get("hist_lows", {}).pop(code, None)
                 state.get("hist_low_dates", {}).pop(code, None)
                 state.get("levels", {}).pop(code, None)
+                retries[code] = retries.get(code, 0) + 1
                 continue
 
-            # 공식 전일 종가(ListingClose)가 유효하면 등락률 기준가로 우선 사용 (애프터마켓 종가 왜곡 차단)
+            # 기준가 결정: 1순위 basic API 기준가 -> 2순위 검증된 ListingClose -> 3순위 수정 전일종가
+            api_base_p = float(base_prices_cache.get(code, 0.0))
             listing_close = float(row["ListingClose"]) if ("ListingClose" in row and pd.notna(row["ListingClose"])) else 0.0
-            if listing_close > 0 and lv["prev_close"] > 0 and abs(listing_close - lv["prev_close"]) / lv["prev_close"] <= 0.18:
+            if api_base_p > 0 and lv["prev_close"] > 0 and abs(api_base_p - lv["prev_close"]) / lv["prev_close"] <= 0.025:
+                ref_prev_close = api_base_p
+            elif listing_close > 0 and lv["prev_close"] > 0 and abs(listing_close - lv["prev_close"]) / lv["prev_close"] <= 0.015:
                 ref_prev_close = listing_close
             else:
                 ref_prev_close = lv["prev_close"]
@@ -1500,7 +1741,7 @@ def main():
                 continue
 
             # ==============================================================
-            # [A] 기본 4종 알림 수집 (폭락일 다이제스트 묶음 지원)
+            # [A] 기본 4종 알림 수집 (심각도 우선순위 부여)
             # ==============================================================
             hist_low = lv["hist_low"]
             prev_low = lv["prev_low"]
@@ -1509,6 +1750,7 @@ def main():
                 if can_fire_once(state, code, "HIST_LOW"):
                     status = "역사적 신저가 이탈!" if l < hist_low else "역사적 저점 근접!"
                     basic_alerts.append({
+                        "priority": 3, "abs_chg": abs(chg),
                         "code": code, "market": market_type, "commit_keys": ["HIST_LOW"],
                         "title": f"🌋 [역사적 저점] {name} ({code}) · {status}",
                         "summary": f"{int(c):,}원 ({chg:+.2f}%) · 저점 {int(hist_low):,}원",
@@ -1535,6 +1777,7 @@ def main():
                 if can_fire_once(state, code, "PREV_LOW"):
                     status = "지지선 하향 이탈" if l < prev_low else "지지선 터치 근접"
                     basic_alerts.append({
+                        "priority": 6, "abs_chg": abs(chg),
                         "code": code, "market": market_type, "commit_keys": ["PREV_LOW"],
                         "title": f"⚓ [스윙 전저점(10봉)] {name} ({code}) · {status}",
                         "summary": f"{int(c):,}원 ({chg:+.2f}%) · 지지선 {int(prev_low):,}원",
@@ -1573,6 +1816,7 @@ def main():
                         )
                         color = 3447003
                     basic_alerts.append({
+                        "priority": 5, "abs_chg": abs(chg),
                         "code": code, "market": market_type, "commit_keys": ["VOL_SURGE"],
                         "title": title,
                         "summary": f"{int(c):,}원 ({chg:+.2f}%) · RVOL {rvol:,.0f}% ({amount_uk:,}억)",
@@ -1591,13 +1835,14 @@ def main():
                 deepest = passed_drops[0]
                 if can_fire_once(state, code, f"DROP_{deepest}"):
                     if deepest <= -15.0:
-                        title, color = f"🧨 [-15% 초급락 경보] {name} ({code})", 10038562
+                        title, color, prio = f"🧨 [-15% 초급락 경보] {name} ({code})", 10038562, 1
                     elif deepest <= -10.0:
-                        title, color = f"🔥 [-10% 폭락 경보] {name} ({code})", 15158332
+                        title, color, prio = f"🔥 [-10% 폭락 경보] {name} ({code})", 15158332, 2
                     else:
-                        title, color = f"📉 [-5% 급락 알림] {name} ({code})", 15105570
+                        title, color, prio = f"📉 [-5% 급락 알림] {name} ({code})", 15105570, 4
                     idx_txt = f"{idx_chg:+.2f}%" if idx_chg is not None else "조회대기"
                     basic_alerts.append({
+                        "priority": prio, "abs_chg": abs(chg),
                         "code": code, "market": market_type,
                         "commit_keys": [f"DROP_{t}" for t in passed_drops],
                         "title": title,
@@ -1911,12 +2156,14 @@ def main():
                         "chg": chg, "rs_growth": rs_20_growth, "amount_uk": amount_uk,
                     })
 
-        # 장중 누적 거래량 프로파일 기록 (자체 거래량 곡선 보정용 데이터)
+        # 장중 누적 거래량 프로파일 기록
         if total_universe_vol > 0:
             bucket_key = f"{hhmm // 10 * 10:04d}"
             state.setdefault("volume_curve_log", {})[bucket_key] = round(total_universe_vol, 0)
+            if not is_intraday:
+                save_daily_volume_curve(state["date"], state["volume_curve_log"], total_universe_vol)
 
-        # 기본 경보 일괄 발송 (다수 발생 시 요약 다이제스트 적용)
+        # 기본 경보 일괄 발송 (심각도 정렬 + 요약 다이제스트 적용)
         if is_intraday and basic_alerts:
             sent_count += flush_basic_alerts(webhook_url, state, basic_alerts)
 
@@ -1931,9 +2178,9 @@ def main():
         # [D] 정시 배치 알림 발송 (mention=True로 @everyone 푸시 발송)
         # ==================================================================
         slot_6 = None
-        if (sched["open_hhmm"] + 200) <= hhmm < (sched["open_hhmm"] + 400):
+        if hhmm_add(sched["open_hhmm"], 120) <= hhmm < hhmm_add(sched["open_hhmm"], 240):
             slot_6 = "BATCH_6_MORNING"
-        elif (sched["close_hhmm"] - 110) <= hhmm < sched["closing_check"]:
+        elif hhmm_add(sched["close_hhmm"], -70) <= hhmm < sched["closing_check"]:
             slot_6 = "BATCH_6_AFTERNOON"
 
         if idx_valid and slot_6 and batch_6_candidates and can_fire_once(state, "MARKET", slot_6):
@@ -1979,7 +2226,7 @@ def main():
                     )
                 sent_count += 1
 
-        if idx_valid and (sched["close_hhmm"] - 40) <= hhmm < sched["closing_check"] and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_CLOSING_RS"):
+        if idx_valid and hhmm_add(sched["close_hhmm"], -40) <= hhmm < sched["closing_check"] and batch_7_candidates and can_fire_once(state, "MARKET", "BATCH_7_CLOSING_RS"):
             valid_7 = [it for it in batch_7_candidates if can_fire_cooldown(state, it["code"], "NEW_7_RS")]
             top5_7 = sorted(valid_7, key=lambda x: x["rs_growth"], reverse=True)[:5]
             if top5_7:
