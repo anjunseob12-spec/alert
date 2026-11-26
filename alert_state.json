@@ -23152,7 +23152,2409 @@
     "target_cnt": 400,
     "levels_ok": 571,
     "krx_cnt": 0,
-    "fb_cnt": 597,
+    "fb_cnt": 599,
     "fail_cnt": 0
-  }
+  },
+  "universe": [
+    {
+      "Code": "005930",
+      "Name": "삼성전자",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000660",
+      "Name": "SK하이닉스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "402340",
+      "Name": "SK스퀘어",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "373220",
+      "Name": "LG에너지솔루션",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "207940",
+      "Name": "삼성바이오로직스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "009150",
+      "Name": "삼성전기",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "005380",
+      "Name": "현대차",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "105560",
+      "Name": "KB금융",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "068270",
+      "Name": "셀트리온",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "032830",
+      "Name": "삼성생명",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "028260",
+      "Name": "삼성물산",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "055550",
+      "Name": "신한지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000270",
+      "Name": "기아",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006400",
+      "Name": "삼성SDI",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "012450",
+      "Name": "한화에어로스페이스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "086790",
+      "Name": "하나금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "034730",
+      "Name": "SK",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "012330",
+      "Name": "현대모비스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "034020",
+      "Name": "두산에너빌리티",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "329180",
+      "Name": "HD현대중공업",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "035420",
+      "Name": "NAVER",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "316140",
+      "Name": "우리금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000810",
+      "Name": "삼성화재",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "066570",
+      "Name": "LG전자",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "011200",
+      "Name": "HMM",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "138040",
+      "Name": "메리츠금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "005490",
+      "Name": "POSCO홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "033780",
+      "Name": "KT&G",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "010120",
+      "Name": "LS ELECTRIC",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "015760",
+      "Name": "한국전력",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "180640",
+      "Name": "한진칼",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "010130",
+      "Name": "고려아연",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "009540",
+      "Name": "HD한국조선해양",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "096770",
+      "Name": "SK이노베이션",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "298040",
+      "Name": "효성중공업",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "024110",
+      "Name": "기업은행",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "018260",
+      "Name": "삼성에스디에스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "086280",
+      "Name": "현대글로비스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "051910",
+      "Name": "LG화학",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "003670",
+      "Name": "포스코퓨처엠",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "042700",
+      "Name": "한미반도체",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "267260",
+      "Name": "HD현대일렉트릭",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "017670",
+      "Name": "SK텔레콤",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "003550",
+      "Name": "LG",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "035720",
+      "Name": "카카오",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "042660",
+      "Name": "한화오션",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "010140",
+      "Name": "삼성중공업",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "030200",
+      "Name": "KT",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "278470",
+      "Name": "에이피알",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "028050",
+      "Name": "삼성E&A",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "010950",
+      "Name": "S-Oil",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "003490",
+      "Name": "대한항공",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006800",
+      "Name": "미래에셋증권",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "005830",
+      "Name": "DB손해보험",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "323410",
+      "Name": "카카오뱅크",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "003230",
+      "Name": "삼양식품",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "047810",
+      "Name": "한국항공우주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "259960",
+      "Name": "크래프톤",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "307950",
+      "Name": "현대오토에버",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "272210",
+      "Name": "한화시스템",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "0126Z0",
+      "Name": "삼성에피스홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "267250",
+      "Name": "HD현대",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "079550",
+      "Name": "LIG디펜스앤에어로스페이스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "090430",
+      "Name": "아모레퍼시픽",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "443060",
+      "Name": "HD현대마린솔루션",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "047050",
+      "Name": "포스코인터내셔널",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "005940",
+      "Name": "NH투자증권",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "352820",
+      "Name": "하이브",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000150",
+      "Name": "두산",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "161390",
+      "Name": "한국타이어앤테크놀로지",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000720",
+      "Name": "현대건설",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "326030",
+      "Name": "SK바이오팜",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "021240",
+      "Name": "코웨이",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "071050",
+      "Name": "한국금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "064400",
+      "Name": "LG씨엔에스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "032640",
+      "Name": "LG유플러스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "064350",
+      "Name": "현대로템",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "078930",
+      "Name": "GS",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "016360",
+      "Name": "삼성증권",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "011070",
+      "Name": "LG이노텍",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000100",
+      "Name": "유한양행",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "128940",
+      "Name": "한미약품",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000500",
+      "Name": "가온전선",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "039490",
+      "Name": "키움증권",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006260",
+      "Name": "LS",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "007660",
+      "Name": "이수페타시스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "271560",
+      "Name": "오리온",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "029780",
+      "Name": "삼성카드",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "088980",
+      "Name": "맥쿼리인프라",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "241560",
+      "Name": "두산밥캣",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "175330",
+      "Name": "JB금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "377300",
+      "Name": "카카오페이",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "009830",
+      "Name": "한화솔루션",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "047040",
+      "Name": "대우건설",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "036570",
+      "Name": "NC",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "012750",
+      "Name": "에스원",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "138930",
+      "Name": "BNK금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "192820",
+      "Name": "코스맥스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "008930",
+      "Name": "한미사이언스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "051900",
+      "Name": "LG생활건강",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001040",
+      "Name": "CJ",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "267270",
+      "Name": "HD건설기계",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000880",
+      "Name": "한화",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "004020",
+      "Name": "현대제철",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "353200",
+      "Name": "대덕전자",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "454910",
+      "Name": "두산로보틱스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "036460",
+      "Name": "한국가스공사",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "034220",
+      "Name": "LG디스플레이",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001440",
+      "Name": "대한전선",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "111770",
+      "Name": "영원무역",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "011790",
+      "Name": "SKC",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "018880",
+      "Name": "한온시스템",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "302440",
+      "Name": "SK바이오사이언스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "161890",
+      "Name": "한국콜마",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "022100",
+      "Name": "포스코DX",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "010060",
+      "Name": "OCI홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "088350",
+      "Name": "한화생명",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "035250",
+      "Name": "강원랜드",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "062040",
+      "Name": "산일전기",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "009420",
+      "Name": "한올바이오파마",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000990",
+      "Name": "DB하이텍",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001450",
+      "Name": "현대해상",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "097950",
+      "Name": "CJ제일제당",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "002380",
+      "Name": "KCC",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "066970",
+      "Name": "엘앤에프",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "251270",
+      "Name": "넷마블",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "026960",
+      "Name": "동서",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "004170",
+      "Name": "신세계",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "028670",
+      "Name": "팬오션",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "031210",
+      "Name": "서울보증보험",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "103590",
+      "Name": "일진전기",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "139130",
+      "Name": "iM금융지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "457190",
+      "Name": "이수스페셜티케미컬",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "282330",
+      "Name": "BGF리테일",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "383220",
+      "Name": "F&F",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "052690",
+      "Name": "한전기술",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "017800",
+      "Name": "현대엘리베이터",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "011780",
+      "Name": "금호석유화학",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "023530",
+      "Name": "롯데쇼핑",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "002790",
+      "Name": "아모레퍼시픽홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "007340",
+      "Name": "DN오토모티브",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006360",
+      "Name": "GS건설",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "085620",
+      "Name": "미래에셋생명",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "020150",
+      "Name": "롯데에너지머티리얼즈",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "004370",
+      "Name": "농심",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "089860",
+      "Name": "롯데렌탈",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "004990",
+      "Name": "롯데지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "279570",
+      "Name": "케이뱅크",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "003690",
+      "Name": "코리안리",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "005440",
+      "Name": "현대지에프홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "018670",
+      "Name": "SK가스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "030000",
+      "Name": "제일기획",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "014680",
+      "Name": "한솔케미칼",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "009970",
+      "Name": "영원무역홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "069960",
+      "Name": "현대백화점",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "004800",
+      "Name": "효성",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "011170",
+      "Name": "롯데케미칼",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001720",
+      "Name": "신영증권",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "082740",
+      "Name": "한화엔진",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "007070",
+      "Name": "GS리테일",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "007810",
+      "Name": "코리아써키트",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000240",
+      "Name": "한국앤컴퍼니",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "081660",
+      "Name": "미스토홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "450080",
+      "Name": "에코프로머티",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "005850",
+      "Name": "에스엘",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "139480",
+      "Name": "이마트",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "375500",
+      "Name": "DL이앤씨",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "181710",
+      "Name": "NHN",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "483650",
+      "Name": "달바글로벌",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "020560",
+      "Name": "아시아나항공",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "112610",
+      "Name": "씨에스윈드",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "489790",
+      "Name": "한화비전",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "462870",
+      "Name": "시프트업",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000120",
+      "Name": "CJ대한통운",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "204320",
+      "Name": "HL만도",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "294870",
+      "Name": "IPARK현대산업개발",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "008770",
+      "Name": "호텔신라",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "051600",
+      "Name": "한전KPS",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "281820",
+      "Name": "케이씨텍",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006280",
+      "Name": "녹십자",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "336260",
+      "Name": "두산퓨얼셀",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "395400",
+      "Name": "SK리츠",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "073240",
+      "Name": "금호타이어",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "439260",
+      "Name": "대한조선",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006040",
+      "Name": "동원산업",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001800",
+      "Name": "오리온홀딩스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "011210",
+      "Name": "현대위아",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "023590",
+      "Name": "다우기술",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "103140",
+      "Name": "풍산",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001120",
+      "Name": "LX인터내셔널",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "415640",
+      "Name": "KB발해인프라",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "001430",
+      "Name": "세아베스틸지주",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "280360",
+      "Name": "롯데웰푸드",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "192080",
+      "Name": "더블유게임즈",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "007310",
+      "Name": "오뚜기",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "000080",
+      "Name": "하이트진로",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "006120",
+      "Name": "SK디스커버리",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "300720",
+      "Name": "한일시멘트",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "034230",
+      "Name": "파라다이스",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "069620",
+      "Name": "대웅제약",
+      "MarketType": "KOSPI",
+      "InTop200": true
+    },
+    {
+      "Code": "196170",
+      "Name": "알테오젠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "277810",
+      "Name": "레인보우로보틱스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "247540",
+      "Name": "에코프로비엠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "086520",
+      "Name": "에코프로",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "036930",
+      "Name": "주성엔지니어링",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "108490",
+      "Name": "로보티즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "222800",
+      "Name": "심텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "000250",
+      "Name": "삼천당제약",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "028300",
+      "Name": "HLB",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "058470",
+      "Name": "리노공업",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "039030",
+      "Name": "이오테크닉스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "240810",
+      "Name": "원익IPS",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "403870",
+      "Name": "HPSP",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "214450",
+      "Name": "파마리서치",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "310210",
+      "Name": "보로노이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "145020",
+      "Name": "휴젤",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "031980",
+      "Name": "피에스케이홀딩스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "095340",
+      "Name": "ISC",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "041510",
+      "Name": "에스엠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "319660",
+      "Name": "피에스케이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "030530",
+      "Name": "원익홀딩스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "010170",
+      "Name": "대한광통신",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "141080",
+      "Name": "리가켐바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "226950",
+      "Name": "올릭스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "298380",
+      "Name": "에이비엘바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "058610",
+      "Name": "에스피지",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "087010",
+      "Name": "펩트론",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "437730",
+      "Name": "삼현",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "257720",
+      "Name": "실리콘투",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "140410",
+      "Name": "메지온",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "357780",
+      "Name": "솔브레인",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "319400",
+      "Name": "현대무벡스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "068760",
+      "Name": "셀트리온제약",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "053800",
+      "Name": "안랩",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "178320",
+      "Name": "서진시스템",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "064760",
+      "Name": "티씨케이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "263750",
+      "Name": "펄어비스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "035900",
+      "Name": "JYP Ent.",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "347850",
+      "Name": "디앤디파마텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "131290",
+      "Name": "티에스이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "043260",
+      "Name": "성호전자",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "237690",
+      "Name": "에스티팜",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "005290",
+      "Name": "동진쎄미켐",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "218410",
+      "Name": "RFHIC",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "080220",
+      "Name": "제주반도체",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "084370",
+      "Name": "유진테크",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "095610",
+      "Name": "테스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "098460",
+      "Name": "고영",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "214370",
+      "Name": "케어젠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "293490",
+      "Name": "카카오게임즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "290650",
+      "Name": "엘앤씨바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "214150",
+      "Name": "클래시스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "078600",
+      "Name": "대주전자재료",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "032820",
+      "Name": "우리기술",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "241710",
+      "Name": "코스메카코리아",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "067310",
+      "Name": "하나마이크론",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "036540",
+      "Name": "SFA반도체",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "950260",
+      "Name": "인제니아테라퓨틱스(Reg.S)",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "323280",
+      "Name": "태성",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "039200",
+      "Name": "오스코텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "440110",
+      "Name": "파두",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "950160",
+      "Name": "코오롱티슈진",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "007390",
+      "Name": "네이처셀",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "140860",
+      "Name": "파크시스템스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "328130",
+      "Name": "루닛",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "060370",
+      "Name": "LS마린솔루션",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "035760",
+      "Name": "CJ ENM",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "089030",
+      "Name": "테크윙",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "096530",
+      "Name": "씨젠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "347700",
+      "Name": "스피어",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "086450",
+      "Name": "동국제약",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "232140",
+      "Name": "와이씨",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "003380",
+      "Name": "하림지주",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "195940",
+      "Name": "HK이노엔",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "131970",
+      "Name": "두산테스나",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "491000",
+      "Name": "리브스메드",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "0009K0",
+      "Name": "에임드바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "253450",
+      "Name": "스튜디오드래곤",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "083650",
+      "Name": "비에이치아이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "100790",
+      "Name": "미래에셋벤처투자",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "251970",
+      "Name": "펌텍코리아",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "356860",
+      "Name": "티엘비",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "122870",
+      "Name": "와이지엔터테인먼트",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "082920",
+      "Name": "비츠로셀",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "089970",
+      "Name": "브이엠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "032500",
+      "Name": "케이엠더블유",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "420770",
+      "Name": "기가비스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "056190",
+      "Name": "SFA",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "204270",
+      "Name": "제이앤티씨",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "093320",
+      "Name": "케이아이엔엑스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "090710",
+      "Name": "휴림로봇",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "121600",
+      "Name": "나노신소재",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "065350",
+      "Name": "신성델타테크",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "099320",
+      "Name": "쎄트렉아이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "468530",
+      "Name": "프로티나",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "166090",
+      "Name": "하나머티리얼즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "295310",
+      "Name": "에이치브이엠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "171090",
+      "Name": "선익시스템",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "252990",
+      "Name": "샘씨엔에스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "456160",
+      "Name": "지투지바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "183300",
+      "Name": "코미코",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "083450",
+      "Name": "GST",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "388720",
+      "Name": "유일로보틱스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "476830",
+      "Name": "알지노믹스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "445680",
+      "Name": "큐리옥스바이오시스템즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "036830",
+      "Name": "솔브레인홀딩스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "085660",
+      "Name": "차바이오텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "031330",
+      "Name": "에스에이엠티",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "290550",
+      "Name": "디케이티",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "281740",
+      "Name": "레이크머티리얼즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "101490",
+      "Name": "에스앤에스텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "425420",
+      "Name": "티에프이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "126340",
+      "Name": "비나텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "092870",
+      "Name": "엑시콘",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "079940",
+      "Name": "가비아",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "041960",
+      "Name": "코미팜",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "041830",
+      "Name": "인바디",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "074600",
+      "Name": "원익QnC",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "006730",
+      "Name": "서부T&D",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "032190",
+      "Name": "다우데이타",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "038500",
+      "Name": "삼표시멘트",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "048410",
+      "Name": "현대바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "417200",
+      "Name": "LS머트리얼즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "089890",
+      "Name": "코세스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "033100",
+      "Name": "제룡전기",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "090360",
+      "Name": "로보스타",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "033790",
+      "Name": "피노",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "053610",
+      "Name": "프로텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "466100",
+      "Name": "클로봇",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "127120",
+      "Name": "제이에스링크",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "160190",
+      "Name": "하이젠알앤엠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "358570",
+      "Name": "지아이이노베이션",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "024850",
+      "Name": "HLB이노베이션",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "137400",
+      "Name": "피엔티",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "059090",
+      "Name": "미코",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "458870",
+      "Name": "씨어스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "161580",
+      "Name": "필옵틱스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "102710",
+      "Name": "이엔에프테크놀로지",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "376300",
+      "Name": "디어유",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "211050",
+      "Name": "인카금융서비스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "086900",
+      "Name": "메디톡스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "189300",
+      "Name": "인텔리안테크",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "327260",
+      "Name": "RF머트리얼즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "050890",
+      "Name": "쏠리드",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "122640",
+      "Name": "예스티",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "222080",
+      "Name": "SFA넥셀",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "219130",
+      "Name": "타이거일렉",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "476060",
+      "Name": "온코닉테라퓨틱스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "0158S0",
+      "Name": "엘리스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "112040",
+      "Name": "위메이드",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "253590",
+      "Name": "네오셈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "023160",
+      "Name": "태광",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "340570",
+      "Name": "티앤엘",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "064290",
+      "Name": "인텍플러스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "225570",
+      "Name": "넥슨게임즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "119850",
+      "Name": "지엔씨에너지",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "014620",
+      "Name": "성광벤드",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "115180",
+      "Name": "큐리언트",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "204620",
+      "Name": "글로벌텍스프리",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "213420",
+      "Name": "덕산네오룩스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "036810",
+      "Name": "에프에스티",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "034950",
+      "Name": "한국기업평가",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "060250",
+      "Name": "NHN KCP",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "046890",
+      "Name": "서울반도체",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "009520",
+      "Name": "포스코엠텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "215200",
+      "Name": "메가스터디교육",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "187660",
+      "Name": "페니트리움바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "125490",
+      "Name": "한라캐스트",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "045100",
+      "Name": "한양이엔지",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "214430",
+      "Name": "아이쓰리시스템",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "383310",
+      "Name": "에코프로에이치엔",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "124500",
+      "Name": "아이티센글로벌",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "174900",
+      "Name": "앱클론",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "144960",
+      "Name": "뉴파워프라즈마",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "082270",
+      "Name": "젬백스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "018290",
+      "Name": "브이티",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "015750",
+      "Name": "성우하이텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "104830",
+      "Name": "원익머트리얼즈",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "356680",
+      "Name": "엑스게이트",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "372320",
+      "Name": "큐로셀",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "037460",
+      "Name": "삼지전자",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "052020",
+      "Name": "에스티큐브",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "101160",
+      "Name": "월덱스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "092730",
+      "Name": "네오팜",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "069080",
+      "Name": "웹젠",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "035890",
+      "Name": "서희건설",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "397030",
+      "Name": "에이프릴바이오",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "033640",
+      "Name": "네패스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "067160",
+      "Name": "SOOP",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "094170",
+      "Name": "동운아나텍",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "490470",
+      "Name": "세미파이브",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "052400",
+      "Name": "코나아이",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "236200",
+      "Name": "슈프리마",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "263860",
+      "Name": "지니언스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "078130",
+      "Name": "에스엠국일",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "399720",
+      "Name": "가온칩스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "099190",
+      "Name": "아이센스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "121440",
+      "Name": "골프존홀딩스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "348340",
+      "Name": "뉴로메카",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    },
+    {
+      "Code": "093520",
+      "Name": "매커스",
+      "MarketType": "KOSDAQ",
+      "InTop200": true
+    }
+  ]
 }
