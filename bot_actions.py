@@ -1,14 +1,14 @@
 """
-[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v12.1)]
+[코스피 · 코스닥 시총 상위 200 올인원 스마트 알림 봇 (bot_actions.py - v13.0)]
 - 유니버스: 코스피 시총 상위 200 + 코스닥 시총 상위 200 (보통주 400종목 + 기존 감시종목 추적 유지)
-- 주요 반영 (v12.1):
-  1. 네이버 모바일 basic API 기반 공식 기준가(전일 종가) 직접 산출 및 0.5% 교차검증(권리락·배당락 오탐 차단)
-  2. 배포 당일 버전 변경 시 alerted/cooldowns 보존 + universe/levels/index_base 초기화로 크래시 방지
-  3. 네이버 모바일 시총 JSON API 폴백 + endswith("0") 우선주 필터 + 수정주가 리셋 카운터
-  4. hhmm_add() 60진법 시간 연산, fchart 005930 직전 거래일 교차검증, 지수 복구 시 RS 캐시 재계산
-  5. 기본 경보 심각도 우선순위 정렬 다이제스트 + 실제 표출 항목만 상태 커밋
-  6. 정규장(09:00~15:30) 전용 volume_curve_history.csv 누적 및 N일 평균 RVOL 보정
-  7. 특수 장 운영일 수동 테이블(SPECIAL_SESSIONS) 적용 및 일목균형표 25봉 시점 일치
+- 주요 반영 (v13.0):
+  1. 코스닥 시총(Marcap) 유효성 및 대형주 검증 추가로 초소형주 혼입 차단 + 당일 무거래(거래량 0) 종목 제외
+  2. 네이버 모바일 basic API 기반 공식 기준가(전일 종가) 직접 산출 및 0.5% 교차검증(권리락·배당락 오탐 차단)
+  3. 배포 당일 버전 변경 시 alerted/cooldowns 보존 + universe/levels/index_base 초기화로 크래시 방지
+  4. 네이버 모바일 시총 JSON API 폴백 + endswith("0") 우선주 필터 + 수정주가 리셋 카운터
+  5. hhmm_add() 60진법 시간 연산, fchart 005930 직전 거래일 교차검증, 지수 복구 시 RS 캐시 재계산
+  6. 기본 경보 심각도 우선순위 정렬 다이제스트 + 실제 표출 항목만 상태 커밋
+  7. 정규장(09:00~15:30) 전용 volume_curve_history.csv 누적 및 N일 평균 RVOL 보정
 """
 
 import os
@@ -27,7 +27,7 @@ KST = timezone(timedelta(hours=9))
 STATE_FILE = "alert_state.json"
 CSV_FILE = "signal_history.csv"
 VOL_CURVE_FILE = "volume_curve_history.csv"
-CURRENT_VERSION = 12
+CURRENT_VERSION = 13
 
 CSV_HEADERS = [
     "date", "code", "name", "market", "sig_id", "sig_label",
@@ -770,7 +770,6 @@ def check_trading_day_and_index_history(state, hhmm, sched):
     if probe_dates[-1] != today_str:
         probe_dates.append(today_str)
 
-    # FDR 직전 거래일과 fchart 005930 직전 봉 날짜 교차 검증 (FDR 지연 방어)
     fchart_prev = _fetch_fchart_prev_trading_day("005930", today_ymd)
     fdr_prev = probe_dates[-2] if len(probe_dates) >= 2 else ""
     if fchart_prev and fdr_prev and fchart_prev > fdr_prev:
@@ -952,9 +951,10 @@ def fetch_top_universe_and_etf(state, live_indices):
                     df = df[~df["Code"].isin(etf_codes)]
                 if CONFIG["EXCLUDE_PREFERRED"]:
                     df = df[df["Code"].str.endswith("0")]
-                if "Marcap" in df.columns:
-                    df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
-                    df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
+                if "Marcap" not in df.columns or df["Marcap"].notna().sum() < CONFIG["TOP_N"]:
+                    raise ValueError(f"KRX {market} 시가총액(Marcap) 데이터 누락")
+                df["Marcap"] = pd.to_numeric(df["Marcap"], errors="coerce")
+                df = df.sort_values("Marcap", ascending=False).reset_index(drop=True)
 
                 if "Close" in df.columns:
                     df["ListingClose"] = pd.to_numeric(df["Close"], errors="coerce").fillna(0.0)
@@ -964,6 +964,8 @@ def fetch_top_universe_and_etf(state, live_indices):
                 top_df = df.head(CONFIG["TOP_N"]).copy()
                 if market == "KOSPI" and not {"005930", "000660"}.issubset(set(top_df["Code"])):
                     raise ValueError("KRX KOSPI 대형주(삼성전자·SK하이닉스) 누락 감지")
+                if market == "KOSDAQ" and not {"247540", "086520", "196170"}.intersection(set(top_df["Code"])):
+                    raise ValueError("KRX KOSDAQ 대형주(에코프로비엠·에코프로·알테오젠) 누락 감지")
                 if len(top_df) < CONFIG["TOP_N"]:
                     raise ValueError(f"KRX {market} 종목 수 부족 ({len(top_df)}종목)")
 
@@ -1665,7 +1667,8 @@ def main():
             in_top200 = bool(row["InTop200"]) if "InTop200" in row else True
 
             c = float(row["Close"]) if pd.notna(row["Close"]) else 0.0
-            if c <= 0:
+            v = float(row["Volume"]) if ("Volume" in row and pd.notna(row["Volume"])) else 0.0
+            if c <= 0 or v <= 0:
                 continue
 
             lv = state["levels"].get(code)
@@ -1709,7 +1712,6 @@ def main():
             else:
                 chg = float(row["ChagesRatio"]) if ("ChagesRatio" in row and pd.notna(row["ChagesRatio"])) else 0.0
 
-            v = float(row["Volume"]) if ("Volume" in row and pd.notna(row["Volume"])) else 0.0
             total_universe_vol += v
             raw_amt = float(row["Amount"]) if ("Amount" in row and pd.notna(row["Amount"])) else 0.0
             amt = raw_amt if raw_amt > 0 else ((h + l + c) / 3.0) * v
