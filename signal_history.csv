@@ -1,2 +1,2 @@
 ﻿date,code,name,market,sig_id,sig_label,entry_price,stop_price,target_price,days_elapsed,d1_ret,d5_ret,max_high,min_low,outcome
-2026-11-25,041510,에스엠,KOSDAQ,NEW_5,5.기준봉중심눌림,95300.0,77000.0,99900.0,1,5.14,,103700.0,95300.0,TARGET_HIT
+2026-11-25,041510,에스엠,KOSDAQ,NEW_5,5.기준봉중심눌림,95300.0,77000.0,99900.0,1,5.14,,104650.0,95300.0,TARGET_HIT
